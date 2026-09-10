@@ -1,34 +1,32 @@
-FROM node:lts-alpine
-
-LABEL maintainer="LibreTV Team"
-LABEL description="LibreTV - 免费在线视频搜索与观看平台"
-
-# 设置环境变量
-ENV PORT=8080
-ENV CORS_ORIGIN=*
-ENV DEBUG=false
-ENV REQUEST_TIMEOUT=5000
-ENV MAX_RETRIES=2
-ENV CACHE_MAX_AGE=1d
-
-# 设置工作目录
+# ---- 构建阶段 ----
+FROM node:22-alpine AS builder
 WORKDIR /app
 
-# 复制 package.json 和 package-lock.json（如果存在）
-COPY package*.json ./
+COPY package.json package-lock.json* ./
+RUN npm ci --no-audit --no-fund
 
-# 安装依赖
-RUN npm ci --only=production && npm cache clean --force
-
-# 复制应用文件
 COPY . .
+ENV DOCKER_BUILD=1
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN npm run build
 
-# 暴露端口
+# ---- 运行阶段 ----
+FROM node:22-alpine AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=8080
+ENV HOSTNAME=0.0.0.0
+
+# 非 root 用户
+RUN addgroup -S nodejs && adduser -S nextjs -G nodejs
+
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder /app/public ./public
+
+USER nextjs
+
 EXPOSE 8080
-
-# 健康检查
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:8080', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) }).on('error', () => process.exit(1))"
-
-# 启动应用
-CMD ["npm", "start"]
+CMD ["node", "server.js"]
