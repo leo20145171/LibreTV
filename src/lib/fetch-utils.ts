@@ -1,6 +1,6 @@
 /** 服务端上游请求工具：超时、重试、安全跳转、JSON 解析 */
 
-import { checkUpstreamAllowed } from './ssrf';
+import { checkLiveUrlAllowed, checkUpstreamAllowed } from './ssrf';
 
 export interface FetchOptions extends RequestInit {
   timeoutMs?: number;
@@ -10,6 +10,11 @@ export interface FetchOptions extends RequestInit {
    * 每一跳重新执行 SSRF 校验——否则公网 URL 可 302 跳转到内网地址绕过预检。
    */
   safeRedirects?: boolean;
+  /**
+   * 直播场景放行内网地址（自建 IPTV）：仅在部署者设置 LIVE_ALLOW_PRIVATE=1 时生效。
+   * 校验复用 checkLiveUrlAllowed，与直播流代理使用同一把尺子。
+   */
+  allowPrivate?: boolean;
 }
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -28,7 +33,7 @@ export async function fetchUpstream(url: string, options: FetchOptions = {}): Pr
 
 /** 同 fetchUpstream，额外返回重定向后的最终 URL */
 export async function fetchUpstreamWithMeta(url: string, options: FetchOptions = {}): Promise<FetchResult> {
-  const { timeoutMs = 8000, retries = 0, safeRedirects = true, ...init } = options;
+  const { timeoutMs = 8000, retries = 0, safeRedirects = true, allowPrivate = false, ...init } = options;
   let lastError: unknown;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -43,7 +48,9 @@ export async function fetchUpstreamWithMeta(url: string, options: FetchOptions =
       // 手动逐跳跟随，每一跳重新过 SSRF 校验
       let current = url;
       for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
-        const verdict = await checkUpstreamAllowed(current);
+        const verdict = allowPrivate
+          ? await checkLiveUrlAllowed(current)
+          : await checkUpstreamAllowed(current);
         if (!verdict.ok) {
           throw new Error(`跳转目标被拒绝: ${verdict.reason}`);
         }

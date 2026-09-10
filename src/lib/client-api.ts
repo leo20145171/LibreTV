@@ -17,6 +17,20 @@ export class ApiError extends Error {
 
 const UNAUTHORIZED_EVENT = 'libretv:unauthorized';
 
+/** 单条测活结果（/api/live/probe，JSON 与 NDJSON 流共用同一结构） */
+export interface LiveProbeResult {
+  url: string;
+  ok: boolean;
+  status?: number;
+  /** 分片级探测：仅统计分片往返耗时 */
+  ms?: number;
+  /** segment=分片级（最可信）/ manifest=仅列表可达 / head=直链单级 */
+  level?: 'segment' | 'manifest' | 'head';
+  error?: string;
+  /** master playlist 的 CODECS，用于前端提示 H.265 等不可解码情况 */
+  codec?: string;
+}
+
 export function onUnauthorized(handler: (event: CustomEvent) => void): () => void {
   const wrapped = (e: Event) => handler(e as CustomEvent);
   window.addEventListener(UNAUTHORIZED_EVENT, wrapped);
@@ -148,15 +162,67 @@ export const api = {
   },
 
   /** 批量测活：分片级探测频道可达性与延迟（单批最多 50 条） */
-  liveProbe: (urls: string[]) =>
-    request<{ results: { url: string; ok: boolean; status?: number; ms?: number; level?: 'segment' | 'manifest' | 'head'; error?: string }[] }>(
+  liveProbe: (urls: string[], signal?: AbortSignal) =>
+    request<{ results: LiveProbeResult[] }>(
       '/api/live/probe',
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ urls }),
+        signal,
       }
     ),
+
+  /**
+   * 流式测活：服务端以 NDJSON 逐条推送（命中缓存的立即返回），
+   * 结果边测边回调，列表状态点可以边测边亮。
+   */
+  liveProbeStream: async (
+    urls: string[],
+    onResult: (result: LiveProbeResult) => void,
+    signal?: AbortSignal
+  ): Promise<void> => {
+    const res = await fetch('/api/live/probe?stream=1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ urls }),
+      signal,
+    });
+    if (res.status === 401) {
+      window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+      throw new ApiError('需要登录', 401);
+    }
+    if (res.status === 503) {
+      window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT, { detail: 'setup' }));
+      throw new ApiError('服务器未配置密码', 503);
+    }
+    if (!res.ok || !res.body) throw new ApiError(`请求失败 (${res.status})`, res.status);
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    const consume = (line: string) => {
+      const text = line.trim();
+      if (!text) return;
+      try {
+        onResult(JSON.parse(text) as LiveProbeResult);
+      } catch {
+        // 坏行跳过，不影响其余结果
+      }
+    };
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buffer.indexOf('\n')) >= 0) {
+        consume(buffer.slice(0, idx));
+        buffer = buffer.slice(idx + 1);
+      }
+    }
+    buffer += decoder.decode();
+    consume(buffer);
+  },
 };
 
 export interface SearchFailure {

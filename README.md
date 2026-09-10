@@ -44,7 +44,14 @@ services:
       - "8080:8080"
     environment:
       - PASSWORD=change-me   # 必填：访问密码，务必修改
+      # - PROXY_SECRET=your-secret          # 会话/代理签名密钥，多实例部署建议设置
+      # - DEFAULT_SOURCES=[{"name":"示例源","url":"https://example.com/api.php/provide/vod"}]
+      # - DEFAULT_LIVE_SOURCES=[{"name":"示例直播源","url":"https://example.com/list.m3u"}]
+      # - DEFAULT_SUBSCRIPTIONS=["https://example.com/sources.json"]  # 预置订阅，自动导入点播源+直播源
+      # - LIVE_ALLOW_PRIVATE=1              # 自建内网 IPTV 源时开启
 ```
+
+> 其余可选变量见下方[环境变量](#环境变量)表；仓库内的 `docker-compose.yml` 含完整注释版本（含 `build: .` 源码构建分支）。
 
 ```bash
 docker compose pull && docker compose up -d

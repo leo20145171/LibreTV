@@ -121,7 +121,7 @@ export function LiveChannelList({ channels, groups, currentUrl, onSelect }: Chan
           className="btn-ghost !py-1 !px-2 text-xs"
           disabled={isProbing || filtered.length === 0}
           onClick={() => void probe(filtered)}
-          title="轻量探测当前列表频道的可达性与延迟（每批 10 条并发探测，结果 6 小时内有效）"
+          title="探测当前列表频道是否可播（分片级校验，每批 50 条并发，结果 6 小时内有效）"
         >
           ⚡ 测活
         </button>
@@ -252,6 +252,16 @@ function ChannelRow({
     if (active) ref.current?.scrollIntoView({ block: 'nearest' });
   }, [active]);
 
+  // H.265/HEVC：国内 IPTV 常见，测活通过但 Chromium 内核通常无法软解
+  const isHevc = Boolean(probe?.codec && /hvc1|hev1|hevc/i.test(probe.codec));
+  const levelText =
+    probe?.level === 'segment' ? '分片可用' : probe?.level === 'head' ? '直链可达' : 'manifest 可用';
+  const probeTitle = probe
+    ? probe.ok
+      ? `${levelText}${probe.ms != null ? ` · 分片耗时 ${probe.ms}ms` : ''}${isHevc ? ' · H.265 编码，需 Edge/Safari' : ''}`
+      : probe.error || '不可用'
+    : undefined;
+
   return (
     <li ref={ref}>
       <div
@@ -301,12 +311,20 @@ function ChannelRow({
                   'w-1.5 h-1.5 rounded-full shrink-0',
                   probe.ok ? 'bg-green-500' : 'bg-red-400'
                 )}
-                title={probe.ok ? `${probe.level === 'segment' ? '分片可用' : 'manifest 可用'} · ${probe.ms}ms` : probe.error || '不可用'}
+                title={probeTitle}
               />
             )}
             <span className={cn('text-xs truncate', active ? 'text-accent font-medium' : 'text-content')}>
               {channel.name}
             </span>
+            {isHevc && (
+              <span
+                className="shrink-0 rounded bg-amber-500/15 px-1 text-[9px] font-medium text-amber-500"
+                title="H.265 编码：测活通过但 Chromium 内核通常无法解码，建议用 Edge/Safari"
+              >
+                H.265
+              </span>
+            )}
           </div>
           {channel.group && (
             <div className="text-[10px] text-faint truncate">{channel.group}</div>
