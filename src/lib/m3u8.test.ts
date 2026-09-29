@@ -156,6 +156,71 @@ describe('stripAdGroups', () => {
   });
 });
 
+describe('stripAdGroups · 长片间超短中插（phimgood 结构）', () => {
+  /** 生成一组总时长 dur 的分片行 */
+  function group(dur: number, name: string, parts = 4): string[] {
+    const lines: string[] = [];
+    const each = dur / parts;
+    for (let i = 0; i < parts; i++) lines.push(`#EXTINF:${each.toFixed(3)},`, `${name}${i}.ts`);
+    return lines;
+  }
+
+  /** 长正片段之间夹短广告段（按 phimgood 实测比例构造） */
+  function phimgoodLike(): string {
+    return [
+      '#EXTM3U',
+      '#EXT-X-TARGETDURATION:8',
+      '#EXT-X-DISCONTINUITY',
+      ...group(298, 'a'),
+      '#EXT-X-DISCONTINUITY',
+      ...group(19, 'ad1', 3),
+      '#EXT-X-DISCONTINUITY',
+      ...group(200, 'b'),
+      '#EXT-X-DISCONTINUITY',
+      ...group(16, 'ad2', 3),
+      '#EXT-X-DISCONTINUITY',
+      ...group(150, 'c'),
+      '#EXT-X-ENDLIST',
+    ].join('\n');
+  }
+
+  it('两长夹一短：超短中插段剔除，长正片段与分段边界保留', () => {
+    const out = stripAdGroups(phimgoodLike());
+    expect(out).not.toContain('ad10.ts');
+    expect(out).not.toContain('ad20.ts');
+    expect(out).toContain('a0.ts');
+    expect(out).toContain('b0.ts');
+    expect(out).toContain('c0.ts');
+    // 4 个边界 DISCONTINUITY 删掉 2 个（各随广告段删除），剩 2 个
+    expect(out.match(/#EXT-X-DISCONTINUITY/g)).toHaveLength(2);
+  });
+
+  it('dytt 式全短段结构不触发（邻段不满足长段条件）', () => {
+    // 首组分片直接开始（无片头 DISCONTINUITY），避开片头启发式，纯测中插规则
+    const short = [
+      '#EXTM3U',
+      ...group(40, 'a'),
+      '#EXT-X-DISCONTINUITY',
+      ...group(24, 'mid'),
+      '#EXT-X-DISCONTINUITY',
+      ...group(24, 'b'),
+      '#EXT-X-ENDLIST',
+    ].join('\n');
+    expect(stripAdGroups(short)).toBe(short);
+  });
+
+  it('末组短段（无后邻）保守放过', () => {
+    const lines = [
+      '#EXTM3U',
+      ...group(300, 'a'),
+      '#EXT-X-DISCONTINUITY',
+      ...group(20, 'tail'),
+      '#EXT-X-ENDLIST',
+    ].join('\n');
+    expect(stripAdGroups(lines)).toBe(lines);
+  });
+});
+
 describe('parseM3u8Playlist · 片头广告剔除', () => {
   it('默认剔除广告段：分片与 totalDuration 均不含广告', async () => {
     const lines = ['#EXTM3U', '#EXT-X-DISCONTINUITY'];

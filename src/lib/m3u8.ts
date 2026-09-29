@@ -170,10 +170,103 @@ function stripMarkedAdGroups(m3u8Content: string): string {
 }
 
 /**
- * 广告过滤总入口：先按 URL 特征剔除任意位置的广告段，再兜底处理
- * 「URL 无特征但位于片头」的插入段（dytt 式）。播放 loader 与下载解析共用。
+ * 中插广告段的时长判定阈值。dytt 式源（正片段本身就 15~40s 交替）绝不能
+ * 触发本规则，因此除了「段超短」还要求「前后邻段都足够长」——两长夹一短
+ * 才视为插入广告（实测 phimgood 源：298s/1198s/2163s/1737s/588s 长正片段
+ * 之间夹 4 个 15~19s 广告段）。
+ */
+const INTERSTITIAL_MAX_SECONDS = 30;
+const INTERSTITIAL_NEIGHBOR_MIN_SECONDS = 120;
+
+interface AdGroupScan {
+  /** 组内容行区间 [start, end)，不含组前的 DISCONTINUITY 行 */
+  start: number;
+  end: number;
+  /** 组前 DISCONTINUITY 行下标（首组为 -1） */
+  discLine: number;
+  seconds: number;
+  count: number;
+}
+
+/** 按 DISCONTINUITY 把播放列表切成组：组 k（k≥1）前的边界行是 discIdx[k-1] */
+function scanGroups(lines: string[], isDisc: (l: string) => boolean, isSegment: (l: string) => boolean): AdGroupScan[] {
+  const discIdx: number[] = [];
+  for (let i = 0; i < lines.length; i++) if (isDisc(lines[i])) discIdx.push(i);
+
+  const groups: AdGroupScan[] = [];
+  const bounds = [0, ...discIdx, lines.length];
+  for (let k = 0; k < bounds.length - 1; k++) {
+    // 组 0 从文件头开始；组 k（k≥1）跳过作为边界的 DISCONTINUITY 行
+    const start = k === 0 ? 0 : bounds[k] + 1;
+    const end = bounds[k + 1];
+    let seconds = 0;
+    let count = 0;
+    for (let i = start; i < end; i++) {
+      const m = lines[i].trim().match(/^#EXTINF:([\d.]+)/);
+      if (m) seconds += parseFloat(m[1]) || 0;
+      else if (isSegment(lines[i])) count += 1;
+    }
+    groups.push({ start, end, discLine: k === 0 ? -1 : bounds[k], seconds, count });
+  }
+  return groups;
+}
+
+/**
+ * 剔除「长正片段之间的超短插入段」（URL 无特征的纯时长型中插广告）。
+ * 判定：段时长 ≤ 30s，且前后邻段时长都 ≥ 120s。基于原始分组一次性评估，
+ * 不级联；dytt 式「全片都是短段」的源因邻段不满足长段条件而完全不触发。
+ * 首组交由片头启发式处理，本函数只看 k ≥ 1 的组。
+ */
+function stripInterstitialAdGroups(m3u8Content: string): string {
+  if (!m3u8Content) return '';
+  const lines = m3u8Content.split('\n');
+  const isDisc = (l: string) => l.trim() === '#EXT-X-DISCONTINUITY';
+  const isSegment = (l: string) => {
+    const t = l.trim();
+    return t !== '' && !t.startsWith('#');
+  };
+
+  const groups = scanGroups(lines, isDisc, isSegment);
+  const drop = new Array<boolean>(lines.length).fill(false);
+  for (let k = 1; k < groups.length; k++) {
+    const g = groups[k];
+    const prev = groups[k - 1];
+    const next = groups[k + 1];
+    if (g.count === 0 || g.discLine < 0) continue;
+    if (g.seconds <= 0 || g.seconds > INTERSTITIAL_MAX_SECONDS) continue;
+    if (!prev || prev.seconds < INTERSTITIAL_NEIGHBOR_MIN_SECONDS) continue;
+    if (!next || next.seconds < INTERSTITIAL_NEIGHBOR_MIN_SECONDS) continue;
+    drop[g.discLine] = true;
+    for (let i = g.start; i < g.end; i++) {
+      const t = lines[i].trim();
+      if (t.startsWith('#EXT-X-KEY') || t.startsWith('#EXT-X-MAP')) continue;
+      drop[i] = true;
+    }
+  }
+  if (!drop.some(Boolean)) return m3u8Content;
+  return lines.filter((_, idx) => !drop[idx]).join('\n');
+}
+
+/** 清除首个分片之前的 DISCONTINUITY：其前没有媒体内容，标记无语义（hls.js 的 cc 从 0 开始） */
+function stripLeadingDisc(content: string): string {
+  const lines = content.split('\n');
+  const firstSeg = lines.findIndex((l) => {
+    const t = l.trim();
+    return t !== '' && !t.startsWith('#');
+  });
+  if (firstSeg <= 0) return content;
+  const kept = lines.filter((l, i) => !(i < firstSeg && l.trim() === '#EXT-X-DISCONTINUITY'));
+  return kept.length === lines.length ? content : kept.join('\n');
+}
+
+/**
+ * 广告过滤总入口（播放 loader 与下载解析共用），按可靠度依次：
+ * 1. URL 特征中插段（adjump 等，任意位置）；
+ * 2. 长正片段之间的超短插入段（纯时长型中插广告）；
+ * 3. 片头无特征插入段（dytt 式，位置+短小启发式）；
+ * 最后统一清掉首分片前失去语义的 DISCONTINUITY。
  */
 export function stripAdGroups(m3u8Content: string): string {
   if (!m3u8Content) return '';
-  return stripLeadAdGroup(stripMarkedAdGroups(m3u8Content));
+  return stripLeadingDisc(stripLeadAdGroup(stripInterstitialAdGroups(stripMarkedAdGroups(m3u8Content))));
 }
