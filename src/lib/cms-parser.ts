@@ -24,8 +24,11 @@ export function parseSearchList(
 ): SearchResultItem[] {
   if (!data || typeof data !== 'object') throw new Error('API返回的数据格式无效');
   const list = (data as { list?: unknown }).list;
-  if (!Array.isArray(list)) throw new Error('API返回的数据格式无效');
-  return list.map((item) => {
+  // 部分源站无结果时返回 list: null（而非 []），视为空结果而非格式错误
+  if (list !== null && list !== undefined && !Array.isArray(list)) {
+    throw new Error('API返回的数据格式无效');
+  }
+  return (Array.isArray(list) ? list : []).map((item) => {
     const vod = item as Record<string, unknown>;
     return {
       sourceKey: source.key,
@@ -43,17 +46,27 @@ export function parseSearchList(
   });
 }
 
-/** 从 vod_play_url 中提取分集地址：格式 源1$$$源2，集1$URL1#集2$URL2 */
+/**
+ * 从 vod_play_url 中提取分集地址：格式 源1$$$源2，集1$URL1#集2$URL2。
+ * 部分源（如量子 lziapi、非凡 ffzy）第一条线路是网页中转页（…/share/xxx，不可播），
+ * 真实 m3u8 在后面的线路里，因此优先取包含 m3u8 直链的线路；均无 m3u8 时回退第一条。
+ */
 export function extractEpisodesFromPlayUrl(playUrl: string): string[] {
   if (!playUrl) return [];
-  const firstSource = playUrl.split('$$$')[0] ?? '';
-  return firstSource
-    .split('#')
-    .map((ep) => {
-      const parts = ep.split('$');
-      return parts.length > 1 ? parts[1] : '';
-    })
-    .filter((url) => url.startsWith('http://') || url.startsWith('https://'));
+  const groups = playUrl
+    .split('$$$')
+    .map((group) =>
+      group
+        .split('#')
+        .map((ep) => {
+          const parts = ep.split('$');
+          return parts.length > 1 ? parts[1] : '';
+        })
+        .filter((url) => url.startsWith('http://') || url.startsWith('https://'))
+    )
+    .filter((eps) => eps.length > 0);
+  if (groups.length === 0) return [];
+  return groups.find((eps) => eps.some((url) => url.includes('.m3u8'))) ?? groups[0];
 }
 
 /** 从简介文本中兜底提取 m3u8 链接 */
@@ -139,7 +152,7 @@ export function parseDetailPageHtml(
 
 /** 敏感分类过滤（成人内容过滤，关键词与旧版保持一致） */
 const ADULT_KEYWORDS = [
-  '伦理片', '福利', '倫理片','里番动漫', '门事件', '萝莉少女', '制服诱惑', '国产传媒',
+  '伦理片', '福利', '倫理片', '福利片', '日本伦理', '日本福利', '日本福利片', '日本伦理片', '擦边短剧', '擦边', '韩国伦理','里番动漫', '门事件', '萝莉少女', '制服诱惑', '国产传媒',
   'cosplay', '黑丝诱惑', '无码', '日本无码', '有码', '日本有码', 'SWAG',
   '网红主播', '色情片', '同性片', '福利视频', '无码高清', '有码高清', '91视频', '自拍偷拍', 'mini传媒', '福利片',
 ];

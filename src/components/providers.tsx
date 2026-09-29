@@ -5,8 +5,10 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { ToastProvider } from './toast';
 import { AuthProvider } from './auth';
 import { ThemeProvider } from './theme';
-import { useAppStore } from '@/lib/store';
-import { syncEnvSubscriptions } from '@/lib/subscription-sync';
+import { GlobalDownloadManager } from './download-manager';
+import { useAppStore, hydrateLiveProbeResults } from '@/lib/store';
+import { api, STATUS_QUERY_KEY } from '@/lib/client-api';
+import { applyEnvPresets } from '@/lib/subscription-sync';
 
 export function Providers({ children }: { children: ReactNode }) {
   const [queryClient] = useState(
@@ -25,29 +27,29 @@ export function Providers({ children }: { children: ReactNode }) {
     // 避免 setEnvSources/setLiveEnvSources 的勾选合并发生在 rehydrate 之前被覆盖
     Promise.resolve(useAppStore.persist.rehydrate())
       .then(() => {
+        // 测活缓存从 IndexedDB 恢复（并顺带搬迁旧 localStorage 快照里的存量），
+        // 与下方 /api/status 拉取互不依赖，失败静默
+        void hydrateLiveProbeResults();
         // 拉取部署者通过 DEFAULT_SOURCES / DEFAULT_LIVE_SOURCES 预置的源（失败时静默忽略）
-        return fetch('/api/status');
+        // 与 AuthProvider 共用同一 query key，/api/status 全站只发一次
+        return queryClient.fetchQuery({ queryKey: STATUS_QUERY_KEY, queryFn: () => api.status() });
       })
-      .then((r) => (r && r.ok ? r.json() : null))
       .then((d) => {
-        if (d && Array.isArray(d.defaultSources)) {
-          useAppStore.getState().setEnvSources(d.defaultSources);
-        }
-        if (d && Array.isArray(d.defaultLiveSources)) {
-          useAppStore.getState().setLiveEnvSources(d.defaultLiveSources);
-        }
-        // 预置订阅（DEFAULT_SUBSCRIPTIONS）：首次自动导入，超 24h 静默刷新，失败下次重试
-        if (d && Array.isArray(d.defaultSubscriptions) && d.defaultSubscriptions.length > 0) {
-          void syncEnvSubscriptions(d.defaultSubscriptions);
-        }
+        // 预置数据（DEFAULT_SOURCES / DEFAULT_LIVE_SOURCES / DEFAULT_SUBSCRIPTIONS）
+        // 预置订阅要经鉴权接口拉取，首屏这次可能发生在登录之前而 401 静默失败；
+        // 登录成功后由 AuthProvider 再调一次 applyEnvPresets 补齐（函数幂等）
+        if (d) return applyEnvPresets(d);
       })
       .catch(() => {});
-  }, []);
+  }, [queryClient]);
 
   return (
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
         <ToastProvider>
+          {/* 全站常驻：下载事件监听（enqueueDownload）依赖它存在——
+              挂在 Header 里会让 /watch 等不渲染 Header 的页面派发的事件凭空丢失 */}
+          <GlobalDownloadManager />
           <AuthProvider>{children}</AuthProvider>
         </ToastProvider>
       </ThemeProvider>

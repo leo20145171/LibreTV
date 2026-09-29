@@ -1,11 +1,14 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { ThemeToggle } from './theme';
 import { SourceManagerDrawer } from './source-manager';
 import { HistoryPanel } from './history-panel';
+import { requestShowDownloadManager } from './download-manager';
+import { Icon } from './icon';
+import { SearchHistoryDropdown, useSearchHistory } from './search-history';
 import { cn } from '@/lib/utils';
 
 /** 顶部导航：Logo、搜索框（首页外）、历史、设置 */
@@ -15,6 +18,22 @@ export function Header({ showSearch = false }: { showSearch?: boolean }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [query, setQuery] = useState('');
+  // 与首页搜索框共用同一套「最近搜索」下拉逻辑
+  const searchHistory = useSearchHistory(query);
+
+  const submitSearch = (text: string) => {
+    const q = text.trim().slice(0, 100);
+    if (!q) return;
+    searchHistory.close();
+    router.push(`/?s=${encodeURIComponent(q)}`, { scroll: false });
+    // 顶栏搜索一并写入最近搜索（此前只有首页会记录）
+    searchHistory.record(q);
+  };
+
+  const pickHistory = (text: string) => {
+    setQuery(text);
+    submitSearch(text);
+  };
 
   return (
     <>
@@ -30,16 +49,48 @@ export function Header({ showSearch = false }: { showSearch?: boolean }) {
               className="flex-1 max-w-xl hidden sm:block"
               onSubmit={(e) => {
                 e.preventDefault();
-                if (query.trim()) router.push(`/?s=${encodeURIComponent(query.trim())}`);
+                submitSearch(query);
               }}
             >
-              <input
-                className="input w-full h-9"
-                placeholder="搜索影片..."
-                value={query}
-                maxLength={100}
-                onChange={(e) => setQuery(e.target.value)}
-              />
+              <div ref={searchHistory.containerRef} className="relative">
+                <input
+                  className={cn(
+                    'input w-full h-9',
+                    // 展开时：上圆角与外框沿用聚焦样式，底边改为内部分隔线，与下拉拼成同一面板
+                    searchHistory.visible &&
+                      'rounded-b-none border-accent border-b-line bg-surface-raised focus-visible:ring-0'
+                  )}
+                  aria-label="搜索影片"
+                  placeholder="搜索影片..."
+                  value={query}
+                  maxLength={100}
+                  onChange={(e) => {
+                    setQuery(e.target.value);
+                    searchHistory.resetActive();
+                  }}
+                  onFocus={searchHistory.onFocus}
+                  onKeyDown={(e) => searchHistory.onKeyDown(e, pickHistory)}
+                  role="combobox"
+                  aria-expanded={searchHistory.visible}
+                  aria-controls="header-search-history"
+                  aria-autocomplete="list"
+                  aria-activedescendant={
+                    searchHistory.visible && searchHistory.activeIndex >= 0
+                      ? `header-search-history-${searchHistory.activeIndex}`
+                      : undefined
+                  }
+                />
+                {searchHistory.visible && (
+                  <SearchHistoryDropdown
+                    id="header-search-history"
+                    matches={searchHistory.matches}
+                    activeIndex={searchHistory.activeIndex}
+                    onPick={pickHistory}
+                    onRemove={searchHistory.remove}
+                    onClearAll={searchHistory.clearAll}
+                  />
+                )}
+              </div>
             </form>
           )}
 
@@ -54,15 +105,13 @@ export function Header({ showSearch = false }: { showSearch?: boolean }) {
             </HeaderLink>
             <ThemeToggle />
             <IconButton label="观看历史" onClick={() => setHistoryOpen(true)}>
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
+              <Icon name="clock" />
+            </IconButton>
+            <IconButton label="下载管理" onClick={requestShowDownloadManager}>
+              <Icon name="download" />
             </IconButton>
             <IconButton label="设置" onClick={() => setSettingsOpen(true)}>
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-              </svg>
+              <Icon name="gear" />
             </IconButton>
           </nav>
         </div>
@@ -98,60 +147,5 @@ function IconButton({ label, onClick, children }: { label: string; onClick: () =
     >
       {children}
     </button>
-  );
-}
-
-/** 面板通用骨架：右侧抽屉 */
-export function Drawer({
-  open,
-  onClose,
-  title,
-  children,
-  width = 'max-w-md',
-}: {
-  open: boolean;
-  onClose: () => void;
-  title: string;
-  children: React.ReactNode;
-  width?: string;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [open, onClose]);
-
-  if (!open) return null;
-  return (
-    <div className="fixed inset-0 z-50">
-      <div className="absolute inset-0 bg-black/60 animate-fade-in" onClick={onClose} />
-      <div
-        ref={ref}
-        className={cn(
-          'absolute right-0 top-0 h-full w-full bg-surface-raised border-l border-line overflow-y-auto scrollbar-thin animate-slide-up',
-          width
-        )}
-        role="dialog"
-        aria-label={title}
-      >
-        <div className="sticky top-0 bg-surface-raised px-4 py-3.5 border-b border-line flex items-center justify-between z-10">
-          <h2 className="font-semibold text-content">{title}</h2>
-          <button
-            className="p-1.5 rounded-md text-muted hover:text-content hover:bg-hover"
-            onClick={onClose}
-            aria-label="关闭"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-        <div className="p-4">{children}</div>
-      </div>
-    </div>
   );
 }

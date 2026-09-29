@@ -1,10 +1,9 @@
 'use client';
 
 import { Header } from '@/components/header';
-import { useAuth } from '@/components/auth';
+import { SiteFooter } from '@/components/site-footer';
 
 export default function AboutPage() {
-  const { version } = useAuth();
   return (
     <div className="min-h-screen flex flex-col">
       <Header />
@@ -45,20 +44,7 @@ export default function AboutPage() {
           </p>
         </section>
       </main>
-      <footer className="border-t border-line py-4">
-        <p className="text-center text-xs text-faint">
-          <a
-            href="https://github.com/LibreSpark/LibreTV"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hover:text-accent"
-          >
-            LibreTV
-          </a>
-          {version ? ` v${version} · ` : ' '}
-          AGPL-3.0 License
-        </p>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

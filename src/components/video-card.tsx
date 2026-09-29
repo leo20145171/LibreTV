@@ -2,9 +2,9 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import type { SearchResultItem } from '@/lib/types';
-import { buildImageUrl } from '@/lib/utils';
 import { useAppStore } from '@/lib/store';
 import { cn } from '@/lib/utils';
+import { SmartImage } from './smart-image';
 
 // —— 跨源同名聚合 ——
 
@@ -75,9 +75,7 @@ export function AggregatedCard({
   const customImageProxy = useAppStore((s) => s.customImageProxy);
   const [imgFailed, setImgFailed] = useState(false);
   const [expanded, setExpanded] = useState(false);
-  const primary = buildImageUrl(group.pic, imageProxyMode, customImageProxy);
-  useEffect(() => setImgFailed(false), [primary]);
-  const showImg = primary && !imgFailed;
+  const showImg = !!group.pic && !imgFailed;
 
   const multi = group.items.length > 1;
   const adult = useMemo(() => group.items.some((i) => i.isAdult), [group.items]);
@@ -88,10 +86,10 @@ export function AggregatedCard({
   };
 
   return (
-    <div className={cn('card', multi && expanded && 'ring-1 ring-accent/40')}>
+    <div className={cn('card', !multi && 'hover:scale-[1.02] hover:shadow-md', multi && expanded && 'ring-1 ring-accent/40')}>
       {/* 不用 h-full：展开面板需要撑高卡片，等高裁切会让面板不可见 */}
       <div
-        className={cn('flex h-full', multi ? 'cursor-pointer' : 'cursor-pointer hover:scale-[1.02]')}
+        className="flex h-full cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/60"
         role="button"
         tabIndex={0}
         aria-expanded={multi ? expanded : undefined}
@@ -105,13 +103,13 @@ export function AggregatedCard({
       >
         {showImg ? (
           <div className="relative flex-shrink-0 w-[105px] sm:w-[120px] aspect-[2/3] bg-chip">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={primary}
+            <SmartImage
+              url={group.pic}
+              mode={imageProxyMode}
+              customProxy={customImageProxy}
               alt={group.name}
               className="absolute inset-0 h-full w-full object-cover"
-              loading="lazy"
-              onError={() => setImgFailed(true)}
+              onExhausted={() => setImgFailed(true)}
             />
             <div className="absolute inset-0 bg-gradient-to-r from-black/30 to-transparent" />
             {multi && (
@@ -141,7 +139,7 @@ export function AggregatedCard({
             <div className="flex flex-wrap gap-1 mb-1.5">
               {group.typeName && <span className="tag bg-accent/15 text-accent">{group.typeName}</span>}
               {group.year && <span className="tag bg-purple-500/15 text-purple-600 dark:text-purple-300">{group.year}</span>}
-              {adult && <span className="tag bg-pink-500/15 text-pink-500">(18+)</span>}
+              {adult && <span className="tag bg-pink-500/15 text-pink-600 dark:text-pink-400">(18+)</span>}
             </div>
             <p className="text-xs text-muted line-clamp-2 mb-2">{group.remarks || '暂无介绍'}</p>
           </div>
@@ -207,36 +205,37 @@ export function VideoCard({ item, onClick }: { item: SearchResultItem; onClick: 
   const imageProxyMode = useAppStore((s) => s.imageProxyMode);
   const customImageProxy = useAppStore((s) => s.customImageProxy);
   const [imgFailed, setImgFailed] = useState(false);
-  const primary = buildImageUrl(item.pic, imageProxyMode, customImageProxy);
-  // 加载方式变化时重置失败状态，允许新地址重试
-  useEffect(() => setImgFailed(false), [primary]);
-  const showImg = primary && !imgFailed;
+  const showImg = !!item.pic && !imgFailed;
 
   return (
     <div
-      className="card cursor-pointer hover:scale-[1.02] hover:shadow-md h-full"
+      className="card cursor-pointer hover:scale-[1.02] hover:shadow-md h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
       role="button"
       tabIndex={0}
       onClick={onClick}
       onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') onClick();
+        if (e.key === 'Enter' || e.key === ' ') {
+          // 阻止空格触发页面滚动（AggregatedCard 已是此写法，此处对齐）
+          e.preventDefault();
+          onClick();
+        }
       }}
     >
       <div className="flex h-full">
         {showImg ? (
-          <div className="relative flex-shrink-0 w-[105px] sm:w-[120px] bg-chip">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={primary}
+          <div className="relative flex-shrink-0 w-[105px] sm:w-[120px] aspect-[2/3] bg-chip">
+            <SmartImage
+              url={item.pic}
+              mode={imageProxyMode}
+              customProxy={customImageProxy}
               alt={item.name}
               className="h-full w-full object-cover"
-              loading="lazy"
-              onError={() => setImgFailed(true)}
+              onExhausted={() => setImgFailed(true)}
             />
             <div className="absolute inset-0 bg-gradient-to-r from-black/30 to-transparent" />
           </div>
         ) : (
-          <div className="flex-shrink-0 w-[105px] sm:w-[120px] bg-chip flex items-center justify-center">
+          <div className="flex-shrink-0 w-[105px] sm:w-[120px] aspect-[2/3] bg-chip flex items-center justify-center">
             <svg className="w-8 h-8 text-faint" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 4v16m10-16v16M3 6a1 1 0 011-1h1a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V6zm4 0a1 1 0 011-1h1a1 1 0 011 1v12a1 1 0 01-1 1h-1a1 1 0 01-1-1V6zm8 0a1 1 0 011-1h1a1 1 0 011 1v12a1 1 0 01-1 1h-1a1 1 0 01-1-1V6zm4 0a1 1 0 011-1h1a1 1 0 011 1v12a1 1 0 01-1 1h-1a1 1 0 01-1-1V6z" />
             </svg>
@@ -268,38 +267,41 @@ export function DoubanCard({ item, onClick }: { item: { title: string; cover: st
   const imageProxyMode = useAppStore((s) => s.imageProxyMode);
   const customImageProxy = useAppStore((s) => s.customImageProxy);
   const [imgFailed, setImgFailed] = useState(false);
-  const primary = buildImageUrl(item.cover, imageProxyMode, customImageProxy);
-  useEffect(() => setImgFailed(false), [primary]);
+  useEffect(() => setImgFailed(false), [item.cover]);
 
   return (
     <div
-      className="card cursor-pointer hover:scale-[1.03] hover:shadow-md"
+      className="card cursor-pointer hover:scale-[1.03] hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
       role="button"
       tabIndex={0}
       onClick={onClick}
       onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') onClick();
+        if (e.key === 'Enter' || e.key === ' ') {
+          // 阻止空格触发页面滚动（AggregatedCard 已是此写法，此处对齐）
+          e.preventDefault();
+          onClick();
+        }
       }}
     >
       <div className="relative aspect-[2/3] bg-chip">
-        {primary && !imgFailed ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={primary}
+        {item.cover && !imgFailed ? (
+          <SmartImage
+            url={item.cover}
+            mode={imageProxyMode}
+            customProxy={customImageProxy}
             alt={item.title}
             className="w-full h-full object-cover"
-            loading="lazy"
-            onError={() => setImgFailed(true)}
+            onExhausted={() => setImgFailed(true)}
           />
         ) : (
           <div className="w-full h-full flex items-center justify-center bg-chip">
-            <svg className="w-9 h-9 text-faint" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className="w-8 h-8 text-faint" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 4v16m10-16v16M3 6a1 1 0 011-1h1a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V6zm4 0a1 1 0 011-1h1a1 1 0 011 1v12a1 1 0 01-1 1h-1a1 1 0 01-1-1V6zm8 0a1 1 0 011-1h1a1 1 0 011 1v12a1 1 0 01-1 1h-1a1 1 0 01-1-1V6zm4 0a1 1 0 011-1h1a1 1 0 011 1v12a1 1 0 01-1 1h-1a1 1 0 01-1-1V6z" />
             </svg>
           </div>
         )}
         {item.rating && (
-          <span className={cn('absolute top-1.5 right-1.5 tag bg-black/70 text-amber-400 font-medium')}>
+          <span className={cn('absolute top-1.5 right-1.5 tag bg-black/70 text-rating font-medium')}>
             ★ {item.rating}
           </span>
         )}

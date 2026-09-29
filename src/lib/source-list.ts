@@ -13,6 +13,15 @@ import type { SourceListPayload } from './types';
 export const MAX_VOD_SOURCES = 100;
 export const MAX_LIVE_SOURCES = 50;
 
+/**
+ * 订阅地址统一形态：trim 并去掉尾部斜杠。
+ * 手动输入与预置订阅（DEFAULT_SUBSCRIPTIONS）都必须走这一步——
+ * 否则同一地址带不带尾斜杠会被存成两条订阅（不同 key 前缀、重复同步、重复拉取）。
+ */
+export function normalizeSubscriptionUrl(raw: string): string {
+  return raw.trim().replace(/\/+$/, '');
+}
+
 interface RawItem {
   name?: unknown;
   url?: unknown;
@@ -21,8 +30,11 @@ interface RawItem {
   epg?: unknown;
 }
 
-/** 规范化为 http(s) 地址；trimV2 控制是否去掉尾部斜杠（点播去、直播保留） */
-function normalizeUrl(raw: unknown, trimTrailingSlash: boolean): string | undefined {
+/**
+ * 规范化为 http(s) 地址；trimTrailingSlash 控制是否去掉尾部斜杠（点播去、直播保留）。
+ * 导出供 tvbox-parser 复用，保证两种订阅格式的归一化规则完全一致。
+ */
+export function normalizeUrl(raw: unknown, trimTrailingSlash: boolean): string | undefined {
   if (typeof raw !== 'string') return undefined;
   const trimmed = raw.trim();
   if (!trimmed) return undefined;
@@ -35,11 +47,11 @@ function normalizeUrl(raw: unknown, trimTrailingSlash: boolean): string | undefi
   return trimTrailingSlash ? trimmed.replace(/\/+$/, '') : trimmed;
 }
 
-function optionalString(raw: unknown): string | undefined {
+export function optionalString(raw: unknown): string | undefined {
   return typeof raw === 'string' && raw.trim() ? raw.trim() : undefined;
 }
 
-function hostnameOf(url: string): string {
+export function hostnameOf(url: string): string {
   try {
     return new URL(url).hostname;
   } catch {

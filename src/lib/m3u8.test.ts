@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { filterAdsFromM3u8, rewriteM3u8 } from './m3u8';
+import { describe, expect, it, vi } from 'vitest';
+import { parseM3u8Playlist } from './m3u8-parse';
+import { isProxiedUri, rewriteM3u8, stripAdGroups, stripLeadAdGroup } from './m3u8';
 
 const BASE = 'https://cdn.example.com/live/index.m3u8';
 
 describe('rewriteM3u8', () => {
-  it('把分片、嵌套播放列表、key、map 全部改写为代理路径', () => {
+  it('把分片、嵌套播放列表、key、map 全部改写为代理地址（查询串形式）', () => {
     const input = [
       '#EXTM3U',
       '#EXT-X-STREAM-INF:BANDWIDTH=1280000',
@@ -18,19 +19,28 @@ describe('rewriteM3u8', () => {
 
     const out = rewriteM3u8(input, BASE);
 
-    expect(out).toContain('/api/proxy/' + encodeURIComponent('https://cdn.example.com/live/720p.m3u8'));
-    expect(out).toContain('/api/proxy/' + encodeURIComponent('https://cdn.example.com/key.bin'));
-    expect(out).toContain('/api/proxy/' + encodeURIComponent('https://cdn.example.com/live/init.mp4'));
-    expect(out).toContain('/api/proxy/' + encodeURIComponent('https://cdn.example.com/relative/seg1.ts'));
-    expect(out).toContain('/api/proxy/' + encodeURIComponent('https://cdn.example.com/live/seg2.ts'));
+    expect(out).toContain('/api/proxy?url=' + encodeURIComponent('https://cdn.example.com/live/720p.m3u8'));
+    expect(out).toContain('/api/proxy?url=' + encodeURIComponent('https://cdn.example.com/key.bin'));
+    expect(out).toContain('/api/proxy?url=' + encodeURIComponent('https://cdn.example.com/live/init.mp4'));
+    expect(out).toContain('/api/proxy?url=' + encodeURIComponent('https://cdn.example.com/relative/seg1.ts'));
+    expect(out).toContain('/api/proxy?url=' + encodeURIComponent('https://cdn.example.com/live/seg2.ts'));
     // 非地址行保持不变
     expect(out).toContain('#EXTM3U');
     expect(out).toContain('#EXT-X-ENDLIST');
   });
 
-  it('已是代理路径的行不重复改写', () => {
-    const input = '/api/proxy/' + encodeURIComponent('https://x.com/a.ts');
-    expect(rewriteM3u8(input, BASE)).toBe(input);
+  it('直播前缀改写为 /api/live/stream?url= 形式', () => {
+    const out = rewriteM3u8('https://cdn.example.com/live/seg1.ts', BASE, 0, '/api/live/stream?url=');
+    expect(out).toBe('/api/live/stream?url=' + encodeURIComponent('https://cdn.example.com/live/seg1.ts'));
+  });
+
+  it('已是代理地址的行（新旧两种形式）不重复改写', () => {
+    const legacy = '/api/proxy/' + encodeURIComponent('https://x.com/a.ts');
+    expect(rewriteM3u8(legacy, BASE)).toBe(legacy);
+    const modern = '/api/proxy?url=' + encodeURIComponent('https://x.com/a.ts');
+    expect(rewriteM3u8(modern, BASE)).toBe(modern);
+    const legacyLive = '/api/live/stream/' + encodeURIComponent('https://x.com/live.m3u8');
+    expect(rewriteM3u8(legacyLive, BASE, 0, '/api/live/stream?url=')).toBe(legacyLive);
   });
 
   it('超过递归深度限制时原样返回', () => {
@@ -39,15 +49,133 @@ describe('rewriteM3u8', () => {
   });
 });
 
-describe('filterAdsFromM3u8', () => {
-  it('剔除 DISCONTINUITY 标记，保留其余内容', () => {
-    const input = ['#EXTM3U', '#EXT-X-DISCONTINUITY', 'ad.ts', '#EXTINF:10,', 'video.ts', '#EXT-X-DISCONTINUITY'].join('\n');
-    const out = filterAdsFromM3u8(input);
-    expect(out).not.toContain('#EXT-X-DISCONTINUITY');
-    expect(out).toContain('video.ts');
+describe('isProxiedUri', () => {
+  it('新旧两种代理形式均识别', () => {
+    expect(isProxiedUri('/api/proxy/' + encodeURIComponent('https://x.com/a.ts'))).toBe(true);
+    expect(isProxiedUri('/api/proxy?url=' + encodeURIComponent('https://x.com/a.ts'))).toBe(true);
+    expect(isProxiedUri('/api/live/stream?url=' + encodeURIComponent('https://x.com/live.m3u8'))).toBe(true);
+    expect(isProxiedUri('https://cdn.example.com/seg1.ts')).toBe(false);
+    expect(isProxiedUri('/relative/seg1.ts')).toBe(false);
+  });
+});
+
+/** 按 dytt 实测结构造播放列表：片头广告段（首个 DISCONTINUITY 段）+ 若干正片段 */
+function dyttLike(adCount: number, adDur = 4): string {
+  const lines = ['#EXTM3U', '#EXT-X-TARGETDURATION:8', '#EXT-X-DISCONTINUITY'];
+  for (let i = 0; i < adCount; i++) lines.push(`#EXTINF:${adDur},`, `ad${i}.ts`);
+  lines.push('#EXT-X-DISCONTINUITY', '#EXTINF:4,', 'movie0.ts');
+  lines.push('#EXT-X-DISCONTINUITY', '#EXTINF:4,', 'movie1.ts', '#EXT-X-ENDLIST');
+  return lines.join('\n');
+}
+
+describe('stripLeadAdGroup', () => {
+
+  it('dytt 结构：整段剔除片头广告分片，正片与后续 DISCONTINUITY 保留', () => {
+    const out = stripLeadAdGroup(dyttLike(3));
+    expect(out).not.toContain('ad0.ts');
+    expect(out).not.toContain('ad2.ts');
+    expect(out).toContain('movie0.ts');
+    expect(out).toContain('movie1.ts');
+    // 正片段之间的 DISCONTINUITY 必须保留（删标记会破坏时间轴，见 dytt 实测）
+    expect(out.match(/#EXT-X-DISCONTINUITY/g)).toHaveLength(1);
+    // 正片前导的 DISCONTINUITY（无前文，失去意义）被清掉
+    const firstSeg = out.indexOf('movie0.ts');
+    expect(out.slice(0, firstSeg)).not.toContain('#EXT-X-DISCONTINUITY');
+  });
+
+  it('段时长超过 90s / 分片数超过 20 时不动', () => {
+    expect(stripLeadAdGroup(dyttLike(30))).toBe(dyttLike(30)); // 120s
+    expect(stripLeadAdGroup(dyttLike(21, 1))).toBe(dyttLike(21, 1)); // 21 片
+  });
+
+  it('首个分片之前没有 DISCONTINUITY 时不动', () => {
+    const input = ['#EXTM3U', '#EXTINF:4,', 'a.ts', '#EXT-X-DISCONTINUITY', '#EXTINF:4,', 'b.ts'].join('\n');
+    expect(stripLeadAdGroup(input)).toBe(input);
+  });
+
+  it('片头段之后没有更多分段时不动（无法与正片区分）', () => {
+    const input = ['#EXTM3U', '#EXT-X-DISCONTINUITY', '#EXTINF:4,', 'a.ts', '#EXTINF:4,', 'b.ts', '#EXT-X-ENDLIST'].join('\n');
+    expect(stripLeadAdGroup(input)).toBe(input);
+  });
+
+  it('段内 KEY/MAP 保留（正片可能复用解密配置）', () => {
+    const lines = dyttLike(2).split('\n');
+    lines.splice(2, 0, '#EXT-X-KEY:METHOD=AES-128,URI="key.bin"', '#EXT-X-MAP:URI="init.mp4"');
+    const out = stripLeadAdGroup(lines.join('\n'));
+    expect(out).toContain('#EXT-X-KEY:METHOD=AES-128,URI="key.bin"');
+    expect(out).toContain('#EXT-X-MAP:URI="init.mp4"');
+    expect(out).not.toContain('ad0.ts');
   });
 
   it('空内容返回空串', () => {
-    expect(filterAdsFromM3u8('')).toBe('');
+    expect(stripLeadAdGroup('')).toBe('');
+  });
+});
+
+describe('stripAdGroups', () => {
+  /** 按暴风源实测结构造播放列表：正片(顺序 1s 分片) + adjump 中插广告段 + 正片 */
+  function konanLike(): string {
+    const lines = ['#EXTM3U', '#EXT-X-TARGETDURATION:3'];
+    for (let i = 0; i < 312; i++) lines.push('#EXTINF:1,', `${String(i).padStart(7, '0')}.ts`);
+    lines.push('#EXT-X-DISCONTINUITY');
+    for (let i = 0; i < 3; i++) lines.push('#EXTINF:3,', `/video/adjump/time/1787320001790000000${i}.ts`);
+    lines.push('#EXT-X-DISCONTINUITY', '#EXTINF:1,', '0000312.ts', '#EXT-X-ENDLIST');
+    return lines.join('\n');
+  }
+
+  it('柯南实测结构：剔除 adjump 中插段，正片完整且只保留一个分段边界', () => {
+    const out = stripAdGroups(konanLike());
+    expect(out).not.toContain('adjump');
+    expect(out).toContain('0000311.ts');
+    expect(out).toContain('0000312.ts');
+    // 段前的 DISCONTINUITY 随段删除、段后的保留为正片分段边界 → 不出现双标记
+    expect(out.match(/#EXT-X-DISCONTINUITY/g)).toHaveLength(1);
+  });
+
+  it('段内混入正片分片时整段放过（全部分片命中特征才剔除）', () => {
+    const lines = [
+      '#EXTM3U',
+      '#EXTINF:1,',
+      'a.ts',
+      '#EXT-X-DISCONTINUITY',
+      '#EXTINF:3,',
+      '/video/adjump/time/x0.ts',
+      '#EXTINF:1,',
+      'real.ts',
+      '#EXT-X-DISCONTINUITY',
+      '#EXTINF:1,',
+      'b.ts',
+    ].join('\n');
+    expect(stripAdGroups(lines)).toBe(lines);
+  });
+
+  it('组合：URL 无特征的片头插入段仍由片头启发式兜底剔除', () => {
+    const out = stripAdGroups(dyttLike(3));
+    expect(out).not.toContain('ad0.ts');
+    expect(out).toContain('movie0.ts');
+  });
+});
+
+describe('parseM3u8Playlist · 片头广告剔除', () => {
+  it('默认剔除广告段：分片与 totalDuration 均不含广告', async () => {
+    const lines = ['#EXTM3U', '#EXT-X-DISCONTINUITY'];
+    for (let i = 0; i < 3; i++) lines.push('#EXTINF:5,', `ad${i}.ts`);
+    lines.push('#EXT-X-DISCONTINUITY', '#EXTINF:4,', 'movie0.ts', '#EXTINF:4,', 'movie1.ts', '#EXT-X-ENDLIST');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(lines.join('\n'), { status: 200 })));
+
+    const parsed = await parseM3u8Playlist('https://cdn.example.com/a.m3u8');
+    expect(parsed.segments.map((s) => s.url)).toEqual([
+      'https://cdn.example.com/movie0.ts',
+      'https://cdn.example.com/movie1.ts',
+    ]);
+    expect(parsed.totalDuration).toBe(8);
+  });
+
+  it('stripLeadAd=false 保留全部分片', async () => {
+    const lines = ['#EXTM3U', '#EXT-X-DISCONTINUITY', '#EXTINF:5,', 'ad.ts', '#EXT-X-DISCONTINUITY', '#EXTINF:4,', 'movie.ts'];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(lines.join('\n'), { status: 200 })));
+
+    const parsed = await parseM3u8Playlist('https://cdn.example.com/a.m3u8', 0, undefined, { stripLeadAd: false });
+    expect(parsed.segments).toHaveLength(2);
   });
 });

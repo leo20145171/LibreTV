@@ -125,6 +125,146 @@ describe('POST /api/live/probe', () => {
     expect(fn.mock.calls.length).toBe(callsAfterFirst);
   });
 
+  it('重定向到错误占位资源（令牌失效）时判为不可用', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/channel/expired')) {
+          return new Response(null, {
+            status: 302,
+            headers: { location: 'https://static.err.test/status/error_account_pirated.mp4' },
+          });
+        }
+        return new Response('mp4-bytes', {
+          status: 200,
+          headers: { 'content-type': 'video/mp4' },
+        });
+      })
+    );
+    const res = await POST(makeRequest(['https://tv.test/channel/expired?token=x'], true));
+    const [line] = await readNdjson(res);
+    expect(line.ok).toBe(false);
+    expect(String(line.error)).toContain('错误占位');
+  });
+
+  it('重定向到仍在 /status/ 下的正常 m3u8 时不误判为错误占位', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/entry')) {
+          return new Response(null, {
+            status: 302,
+            headers: { location: 'https://cdn.ok.test/status/live.m3u8' },
+          });
+        }
+        if (url.includes('/status/live.m3u8')) {
+          return jsonRes(MEDIA, 'application/vnd.apple.mpegurl');
+        }
+        return new Response('x', { status: 206, headers: { 'content-type': 'video/mp2t' } });
+      })
+    );
+    const res = await POST(makeRequest(['https://cdn.ok.test/entry?token=x'], true));
+    const [line] = await readNdjson(res);
+    expect(line.ok).toBe(true);
+    expect(line.level).toBe('segment');
+  });
+
+  it('直链 MP4 只标记为 head（可达但未验证可播性）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('mp4-bytes', {
+        status: 200,
+        headers: { 'content-type': 'video/mp4' },
+      }))
+    );
+    const res = await POST(makeRequest(['https://direct.test/live/stream?id=1'], true));
+    const [line] = await readNdjson(res);
+    expect(line.ok).toBe(true);
+    expect(line.level).toBe('head');
+  });
+
+  it('探测窗口内最新分片（滑动窗口下最不易过期）', async () => {
+    const MEDIA3 = [
+      '#EXTM3U',
+      '#EXT-X-TARGETDURATION:5',
+      '#EXTINF:5.0,',
+      'old_seg.ts',
+      '#EXTINF:5.0,',
+      'mid_seg.ts',
+      '#EXTINF:5.0,',
+      'newest_seg.ts',
+      '',
+    ].join('\n');
+    const requested: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        requested.push(url);
+        if (url.includes('newest.test')) {
+          return jsonRes(MEDIA3, 'application/vnd.apple.mpegurl');
+        }
+        return new Response('x', {
+          status: 206,
+          headers: { 'content-type': 'video/mp2t' },
+        });
+      })
+    );
+
+    const res = await POST(makeRequest(['https://newest.test/live/index.m3u8'], true));
+    const [line] = await readNdjson(res);
+    expect(line.ok).toBe(true);
+    expect(line.level).toBe('segment');
+    expect(requested.some((u) => u.includes('newest_seg.ts'))).toBe(true);
+    expect(requested.some((u) => u.includes('old_seg.ts'))).toBe(false);
+  });
+
+  it('manifest 请求不携带 Range，分片请求才携带（避免被源截断成 2 字节误判）', async () => {
+    const seen: { url: string; range?: string }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const headers = (init?.headers ?? {}) as Record<string, string>;
+        seen.push({ url, range: headers.Range });
+        if (url.includes('/live/master.m3u8') || url.includes('/live/media.m3u8')) {
+          // 模拟严格按 Range 截断的源：一旦带 Range 就只回 2 字节
+          if (headers.Range) {
+            return new Response('#E', {
+              status: 206,
+              headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+            });
+          }
+          return jsonRes(
+            url.includes('master.m3u8') ? MASTER : MEDIA,
+            'application/vnd.apple.mpegurl'
+          );
+        }
+        return new Response('x', {
+          status: headers.Range ? 206 : 200,
+          headers: { 'content-type': 'video/mp2t' },
+        });
+      })
+    );
+
+    const res = await POST(makeRequest(['https://range.test/live/master.m3u8'], true));
+    const [line] = await readNdjson(res);
+    expect(line.ok).toBe(true);
+    expect(line.level).toBe('segment');
+
+    const manifestCalls = seen.filter((s) => s.url.includes('/live/') && !s.url.includes('seg1.ts'));
+    expect(manifestCalls.length).toBeGreaterThan(0);
+    expect(manifestCalls.every((c) => !c.range)).toBe(true);
+
+    const segmentCalls = seen.filter((s) => s.url.includes('seg1.ts'));
+    expect(segmentCalls.length).toBeGreaterThan(0);
+    // 可达性检查 bytes=0-1（收到响应头即 cancel）+ 吞吐采样 bytes=0-131071
+    expect(segmentCalls.some((c) => c.range === 'bytes=0-1')).toBe(true);
+    expect(segmentCalls.every((c) => c.range === 'bytes=0-1' || c.range === 'bytes=0-131071')).toBe(true);
+  });
+
   it('未开启 LIVE_ALLOW_PRIVATE 时拒绝内网地址', async () => {
     mockUpstream();
     delete process.env.LIVE_ALLOW_PRIVATE;

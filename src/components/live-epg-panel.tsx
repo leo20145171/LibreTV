@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/client-api';
 import { cn } from '@/lib/utils';
 import type { EpgProgram } from '@/lib/types';
+import { EmptyState, ErrorState, Spinner } from './states';
 
 /**
  * EPG 节目单面板：当前节目（含播放进度条）+ 接下来节目列表 + 简介展开。
@@ -38,29 +39,24 @@ export function LiveEpgPanel({ epgUrl, tvgId }: { epgUrl?: string; tvgId?: strin
 
   if (!enabled) {
     return (
-      <p className="text-center text-xs text-faint py-4">
-        该频道未配置节目单数据（需来源订阅提供 EPG 地址且频道带 tvg-id）
-      </p>
+      <EmptyState
+        variant="plain"
+        title="该频道未配置节目单数据（需来源订阅提供 EPG 地址且频道带 tvg-id）"
+        className="!py-4"
+      />
     );
   }
 
   if (epgQuery.isLoading) {
     return (
       <div className="flex items-center justify-center py-6">
-        <div className="h-5 w-5 rounded-full border-[3px] border-line border-t-accent animate-spin" />
+        <Spinner size="sm" />
       </div>
     );
   }
 
   if (epgQuery.isError) {
-    return (
-      <div className="text-center py-4">
-        <p className="text-xs text-faint mb-1.5">节目单加载失败</p>
-        <button className="btn-ghost !py-1 text-xs" onClick={() => epgQuery.refetch()}>
-          重试
-        </button>
-      </div>
-    );
+    return <ErrorState message="节目单加载失败" onRetry={() => epgQuery.refetch()} className="!py-4" />;
   }
 
   const data = epgQuery.data;
@@ -74,7 +70,7 @@ export function LiveEpgPanel({ epgUrl, tvgId }: { epgUrl?: string; tvgId?: strin
       {current ? (
         <div className="bg-card border border-line rounded-lg p-3">
           <div className="flex items-center gap-2 mb-1.5">
-            <span className="text-[10px] font-semibold text-red-500 bg-red-500/10 px-1.5 py-0.5 rounded">
+            <span className="text-[10px] font-semibold text-danger bg-danger/10 px-1.5 py-0.5 rounded-full">
               正在播出
             </span>
             <span className="text-[10px] text-faint">
@@ -82,7 +78,8 @@ export function LiveEpgPanel({ epgUrl, tvgId }: { epgUrl?: string; tvgId?: strin
             </span>
           </div>
           <button
-            className="text-sm font-medium text-content text-left w-full text-left"
+            className="text-sm font-medium text-content w-full text-left"
+            aria-expanded={expandedDesc}
             onClick={() => setExpandedDesc((v) => !v)}
           >
             {current.title}

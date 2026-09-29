@@ -5,14 +5,17 @@ import { fetchUpstream, getCache, setCache } from './fetch-utils';
  * 影视热榜聚合（经 60s API，免 key，https://github.com/vikiboss/60s）。
  * 豆瓣周榜走其 rexxar 移动端接口（需伪装 iPhone UA），百度热播剧榜解析 top.baidu.com，
  * 均由 60s 代为抓取；这里只做服务端转发 + 内存缓存 + 字段归一。
- * 官方公共实例有限流，生产可通过 60S_API_BASE 指向自部署实例。
+ * 默认走社区实例 crystelf.top，失败自动回退官方公共实例（每日额度有限，
+ * 数据中心出口 IP 常被限流，Vercel 上不可依赖）；可用 60S_API_BASE 指向自部署实例。
  */
 
 const CACHE_TTL = 60 * 60 * 1000;
 const UA = 'LibreTV-Next (+https://github.com/bestZwei/LibreTV-Next)';
 
+const FALLBACK_BASE = 'https://60s.viki.moe';
+
 function apiBase(): string {
-  return (process.env['60S_API_BASE'] || 'https://60s.viki.moe').replace(/\/+$/, '');
+  return (process.env['60S_API_BASE'] || 'https://60s.crystelf.top').replace(/\/+$/, '');
 }
 
 /** 榜单标识：豆瓣五个周榜 + 百度热播剧榜 */
@@ -61,7 +64,9 @@ interface SixtyResponse<T> {
 
 /** 豆瓣周榜条目 → DoubanItem；缺标题或封面的脏数据丢弃 */
 export function doubanWeeklyToItem(raw: DoubanWeeklyRaw, isTv: boolean): DoubanItem | undefined {
-  const cover = raw.cover_proxy || raw.cover;
+  // 原生 cover 是 img*.doubanio.com，命中图片代理的豆瓣白名单并带 Referer 伪装，
+  // 可稳定加载；cover_proxy（doubanio.viki.moe 公共镜像）限流严重，仅作兜底
+  const cover = raw.cover || raw.cover_proxy;
   if (!raw.id || !raw.title || !cover) return undefined;
   return {
     id: String(raw.id),
@@ -90,12 +95,24 @@ function assertArray<T>(value: unknown, what: string): T[] {
 }
 
 async function fetchJson(path: string): Promise<unknown> {
-  const res = await fetchUpstream(`${apiBase()}${path}`, {
-    timeoutMs: 8000,
-    headers: { 'User-Agent': UA, Accept: 'application/json' },
-  });
-  if (!res.ok) throw new Error(`60s API 响应异常 (${res.status})`);
-  return res.json();
+  const primary = apiBase();
+  // 主实例失败（限流/宕机/网络不通）时回退官方实例；两者相同则只试一次
+  const bases = primary === FALLBACK_BASE ? [primary] : [primary, FALLBACK_BASE];
+
+  let lastError: unknown;
+  for (const base of bases) {
+    try {
+      const res = await fetchUpstream(`${base}${path}`, {
+        timeoutMs: 8000,
+        headers: { 'User-Agent': UA, Accept: 'application/json' },
+      });
+      if (!res.ok) throw new Error(`60s API 响应异常 (${res.status})`);
+      return await res.json();
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('60s API 请求失败');
 }
 
 export async function fetchHotList(id: HotListId): Promise<DoubanItem[]> {

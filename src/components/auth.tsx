@@ -2,7 +2,9 @@
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { api, onUnauthorized } from '@/lib/client-api';
+import { api, onUnauthorized, STATUS_QUERY_KEY } from '@/lib/client-api';
+import { applyEnvPresets } from '@/lib/subscription-sync';
+import type { AuthStatusResponse } from '@/lib/types';
 import { useToast } from './toast';
 
 /**
@@ -46,17 +48,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
+  // 与 Providers 共用同一 query key 与缓存，避免 /api/status 被请求两次
   useEffect(() => {
-    api
-      .status()
+    let cancelled = false;
+    queryClient
+      .fetchQuery({ queryKey: STATUS_QUERY_KEY, queryFn: () => api.status() })
       .then((s) => {
+        if (cancelled) return;
         setVerified(s.verified);
         setSetupRequired(!s.passwordRequired);
         setVersion(s.version);
         setChecked(true);
       })
-      .catch(() => setChecked(true));
-  }, []);
+      .catch(() => {
+        if (!cancelled) setChecked(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [queryClient]);
 
   useEffect(
     () =>
@@ -80,13 +90,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [toast]);
 
-  const handleLoginSuccess = useCallback(() => {
+  const handleLoginSuccess = useCallback(async () => {
     setVerified(true);
     setSetupRequired(false);
     setModalOpen(false);
     // 登录前以 401 失败的查询（如豆瓣推荐）需要重新拉取
     queryClient.invalidateQueries();
     toast('验证成功', 'success');
+    // 预置订阅（DEFAULT_SUBSCRIPTIONS）的首屏同步发生在登录之前，会 401 静默失败，
+    // 这里用缓存中的 /api/status 补跑一次（缓存缺失时回落为一次请求）
+    try {
+      const cached = queryClient.getQueryData<AuthStatusResponse>(STATUS_QUERY_KEY);
+      const status =
+        cached ??
+        (await queryClient.fetchQuery<AuthStatusResponse>({
+          queryKey: STATUS_QUERY_KEY,
+          queryFn: () => api.status(),
+          staleTime: 0,
+        }));
+      if (status) await applyEnvPresets(status);
+    } catch {
+      // 补拉预置数据失败不影响登录后的正常使用
+    }
   }, [toast, queryClient]);
 
   return (
@@ -153,7 +178,12 @@ function LoginModal({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="bg-surface-raised rounded-xl p-6 w-full max-w-sm mx-4 shadow-2xl">
+      <div
+        className="bg-surface-raised rounded-xl p-6 w-full max-w-sm mx-4 shadow-2xl"
+        role="dialog"
+        aria-modal="true"
+        aria-label={setupRequired ? '需要配置密码' : '访问验证'}
+      >
         {setupRequired ? (
           <>
             <h2 className="text-lg font-semibold text-content mb-3">需要配置密码</h2>
@@ -181,7 +211,7 @@ function LoginModal({
                 placeholder="密码"
                 autoComplete="current-password"
               />
-              {error && <p className="mt-2 text-sm text-red-400">{error}</p>}
+              {error && <p className="mt-2 text-sm text-danger">{error}</p>}
               <button type="submit" className="btn-primary w-full mt-4" disabled={loading || !password.trim()}>
                 {loading ? '验证中...' : '进入'}
               </button>

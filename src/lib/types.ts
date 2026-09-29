@@ -58,14 +58,23 @@ export interface SourceSearchOutcome {
   ok: boolean;
   list: SearchResultItem[];
   error?: string;
+  /** 因超时失败：源可能只是慢，前端以琥珀色区分于真正的失败 */
+  timedOut?: boolean;
+  /** 该源搜索总耗时（ms），用于健康徽章 */
+  ms?: number;
 }
 
 // —— API 响应结构 ——
 
 export interface SearchResponse {
   list: SearchResultItem[];
-  failures: { sourceKey: string; error: string }[];
+  failures: { sourceKey: string; error: string; timedOut?: boolean }[];
 }
+
+/** /api/search?stream=1 的 NDJSON 事件：逐源推送 + 最终聚合 */
+export type SearchStreamEvent =
+  | ({ type: 'source' } & SourceSearchOutcome)
+  | { type: 'done'; list: SearchResultItem[]; failures: SearchResponse['failures'] };
 
 export interface DoubanResponse {
   items: DoubanItem[];
@@ -93,6 +102,10 @@ export interface AuthStatusResponse {
   defaultLiveSources: LiveSourceConfig[];
   /** 部署者通过 DEFAULT_SUBSCRIPTIONS 环境变量预置的 SourceList 订阅链接（未配置时为空数组） */
   defaultSubscriptions: { url: string; name?: string }[];
+  /** 部署者通过 DEFAULT_RECOMMEND_SOURCE 环境变量指定的首页推荐数据源默认值（未配置时为 null） */
+  defaultRecommendSource: 'douban' | 'bangumi' | 'hot-list' | null;
+  /** 部署者通过 DEFAULT_IMAGE_MODE 环境变量指定的封面图加载方式默认值（未配置时为 null） */
+  defaultImageMode: 'direct' | 'proxy' | null;
 }
 
 // —— 直播 / IPTV ——
@@ -147,9 +160,37 @@ export interface LiveEpgResponse {
 
 // —— 数据源订阅 ——
 
+/** 订阅条目未被导入（跳过）的原因分类 */
+export type SubscriptionSkipReason =
+  /** Spider 类站点（csp_* / jar / js / py），需 TVBOX 引擎才能运行 */
+  | 'spider'
+  /** 仅提供 XML 接口或不支持的类型 */
+  | 'xml'
+  /** 站点自身标记为不可搜索（本站只有搜索入口，导入后无法使用） */
+  | 'unsearchable'
+  /** 直播源不是 M3U 播放列表（如 txt 频道列表、单仓 JSON） */
+  | 'nonM3uLive'
+  /** 地址非法、非 http(s) 或未通过服务端公网校验 */
+  | 'invalidUrl';
+
+/** 订阅解析统计：说明跳过与截断情况，用于导入结果提示 */
+export interface SubscriptionParseStats {
+  /** 识别出的订阅格式 */
+  format: 'libretv' | 'tvbox';
+  /** 被跳过的条目总数 */
+  skipped: number;
+  /** 跳过原因分类计数 */
+  skippedByReason: Partial<Record<SubscriptionSkipReason, number>>;
+  /** 被跳过条目的名称示例（最多 3 个），便于用户定位 */
+  skippedSamples?: string[];
+  /** 因超出数量上限被截断的条目数 */
+  truncated: number;
+}
+
 /**
- * 远程订阅（LibreTV-SourceList JSON）解析结果。
+ * 远程订阅解析结果。
  * `sources` 为点播源（Apple CMS 采集站），`liveSources` 为直播源（M3U + 可选 EPG）。
+ * 兼容两种订阅格式：LibreTV-SourceList JSON 与 TVBOX 配置 JSON（`sites` / `lives`）。
  * 老格式订阅只有 `sources`，此时 `liveSources` 为空数组。
  */
 export interface SourceListPayload {
@@ -157,4 +198,6 @@ export interface SourceListPayload {
   name?: string;
   sources: Omit<SourceConfig, 'key'>[];
   liveSources: Omit<LiveSourceConfig, 'key'>[];
+  /** 解析统计（格式、跳过与截断），老数据可能缺失 */
+  stats?: SubscriptionParseStats;
 }

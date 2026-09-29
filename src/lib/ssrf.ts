@@ -1,14 +1,36 @@
 import dns from 'node:dns/promises';
 
+/** 去掉 URL.hostname 对 IPv6 附加的方括号（"[::1]" → "::1"） */
+function stripBrackets(host: string): string {
+  return host.trim().replace(/^\[+|\]+$/g, '');
+}
+
+/**
+ * IPv4-mapped / IPv4-compatible IPv6 还原为点分十进制，命中不到时返回 null。
+ * "::ffff:192.168.1.100" 与 "::ffff:c0a8:164" 都会归一化成 "192.168.1.100"，
+ * 否则这类地址会绕过下面的私网规则被当成公网放行。
+ */
+function toIPv4(ip: string): string | null {
+  const v = ip.replace(/^0:0:0:0:0:/i, '::'); // 全写形式
+  const dotted = /^::(?:ffff:)?(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(v);
+  if (dotted) return dotted[1];
+  const hex = /^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(v);
+  if (!hex) return null;
+  const n = (((parseInt(hex[1], 16) << 16) | parseInt(hex[2], 16)) >>> 0);
+  return [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.');
+}
+
 /** 判断 IP 是否为私有/回环/链路本地/保留地址（SSRF 防护） */
 export function isPrivateIP(ip: string): boolean {
-  if (/^(127\.|0\.0\.0\.0$|::1$|fe80:|fc|fd)/i.test(ip)) return true;
-  if (ip.startsWith('10.')) return true;
-  if (ip.startsWith('192.168.')) return true;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;
-  if (ip.startsWith('169.254.')) return true; // 链路本地（含云元数据 169.254.169.254）
-  if (ip.startsWith('100.64.')) return true; // CGNAT
-  if (ip.startsWith('192.0.0.')) return true; // 协议分配块
+  let v = stripBrackets(ip.trim());
+  v = toIPv4(v) ?? v;
+  if (/^(127\.|0\.0\.0\.0$|::1$|::$|fe80:|fc|fd)/i.test(v)) return true;
+  if (v.startsWith('10.')) return true;
+  if (v.startsWith('192.168.')) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(v)) return true;
+  if (v.startsWith('169.254.')) return true; // 链路本地（含云元数据 169.254.169.254）
+  if (v.startsWith('100.64.')) return true; // CGNAT
+  if (v.startsWith('192.0.0.')) return true; // 协议分配块
   return false;
 }
 
@@ -19,8 +41,8 @@ export function isValidProxyUrl(urlString: string): boolean {
   try {
     const parsed = new URL(urlString);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-    if (BLOCKED_HOSTNAMES.has(parsed.hostname)) return false;
-    const host = parsed.hostname;
+    const host = stripBrackets(parsed.hostname); // "[::1]" 也要能被黑名单命中
+    if (BLOCKED_HOSTNAMES.has(host)) return false;
     if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':')) {
       if (isPrivateIP(host)) return false;
     }
@@ -33,7 +55,7 @@ export function isValidProxyUrl(urlString: string): boolean {
 /** DNS 解析后校验目标主机名是否解析到内网/保留地址 */
 export async function isBlockedByDNS(urlString: string): Promise<boolean> {
   try {
-    const { hostname } = new URL(urlString);
+    const hostname = stripBrackets(new URL(urlString).hostname);
     if (/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) || hostname.includes(':')) {
       return isPrivateIP(hostname);
     }

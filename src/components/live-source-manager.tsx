@@ -1,235 +1,372 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useAppStore } from '@/lib/store';
 import { useToast } from './toast';
 import { api } from '@/lib/client-api';
-import { formatRelativeTime, validateSourceUrl, cn } from '@/lib/utils';
+import { formatRelativeTime, hostnameOf, validateSourceUrl, cn } from '@/lib/utils';
+import { SearchInput, SectionTitle, TestBadge, useSourceTests } from './settings-shared';
+import { EmptyState } from './states';
+import { Icon } from './icon';
 
 /**
- * 直播源管理（嵌入设置抽屉）：M3U 订阅的添加 / 探活 / 同步 / 移除 / 导出，
- * 以及部署者预置源展示。模式对齐采集站的 SourceSubscriptions。
+ * 直播源管理（嵌入设置抽屉）：M3U 订阅的添加 / 探活 / 移除 / 导出，
+ * 以及部署者预置源展示。工具条、徽章、空态与撤销语义与点播源面板保持一致。
  */
 
-type TestState =
-  | { status: 'loading' }
-  | { status: 'done'; ok: boolean; ms?: number; count?: number; error?: string };
+type LiveFilter = 'all' | 'enabled' | 'disabled' | 'sub' | 'manual';
 
-/** 取 hostname 作为名称兜底；地址非法时原样返回 */
-function hostnameOf(url: string): string {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return url;
-  }
+// 与点播源面板保持同一组筛选项与顺序：先状态（已启用 / 已停用），后来源（来自订阅 / 手动添加）
+const LIVE_FILTERS: { id: LiveFilter; label: string }[] = [
+  { id: 'all', label: '全部' },
+  { id: 'enabled', label: '已启用' },
+  { id: 'disabled', label: '已停用' },
+  { id: 'sub', label: '来自订阅' },
+  { id: 'manual', label: '手动添加' },
+];
+
+interface LiveRow {
+  url: string;
+  label: string;
+  epgUrl?: string;
+  preset: boolean;
+  lastSync?: number;
+  fromSubscriptions: string[];
 }
 
 export function LiveSourceManager() {
   const store = useAppStore();
   const { toast } = useToast();
-  const [name, setName] = useState('');
-  const [subUrl, setSubUrl] = useState('');
-  const [epg, setEpg] = useState('');
-  const [tests, setTests] = useState<Record<string, TestState>>({});
+  const [adding, setAdding] = useState(false);
+  /** 正在编辑的手动源 URL（与「添加」共用同一表单） */
+  const [editing, setEditing] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState<LiveFilter>('all');
+  const { tests, runTest } = useSourceTests();
 
-  const addAndTest = () => {
-    const url = subUrl.trim();
-    if (!validateSourceUrl(url)) {
-      toast('订阅地址需以 http:// 或 https:// 开头', 'warning');
-      return;
-    }
-    store.addLiveSubscription(url, name.trim() || undefined, epg.trim() || undefined);
-    void runTest(url, url);
-    setSubUrl('');
-    setName('');
-    setEpg('');
-  };
-
-  const runTest = async (key: string, url: string) => {
-    setTests((prev) => ({ ...prev, [key]: { status: 'loading' } }));
-    const r = await api.liveTest(url);
-    setTests((prev) => ({
-      ...prev,
-      [key]: r.ok
-        ? { status: 'done', ok: true, ms: r.ms, count: r.count }
-        : { status: 'done', ok: false, error: r.error },
+  const rows = useMemo<LiveRow[]>(() => {
+    const preset: LiveRow[] = store.liveEnvSources.map((s) => ({
+      url: s.url,
+      label: s.name || hostnameOf(s.url),
+      epgUrl: s.epg,
+      preset: true,
+      fromSubscriptions: [],
     }));
-  };
+    const subs: LiveRow[] = store.liveSubscriptions.map((s) => ({
+      url: s.url,
+      label: s.name || hostnameOf(s.url),
+      epgUrl: s.epg,
+      preset: false,
+      lastSync: s.lastSync,
+      fromSubscriptions: s.fromSubscriptions,
+    }));
+    const all = [...preset, ...subs];
+    const q = query.trim().toLowerCase();
+    return all.filter((r) => {
+      if (filter === 'enabled' && !store.liveSelectedUrls.includes(r.url)) return false;
+      if (filter === 'disabled' && store.liveSelectedUrls.includes(r.url)) return false;
+      if (filter === 'sub' && r.fromSubscriptions.length === 0) return false;
+      if (filter === 'manual' && !(r.fromSubscriptions.length === 0 && !r.preset)) return false;
+      if (!q) return true;
+      return r.label.toLowerCase().includes(q) || r.url.toLowerCase().includes(q);
+    });
+  }, [store.liveEnvSources, store.liveSubscriptions, store.liveSelectedUrls, query, filter]);
+
+  // 编辑中的手动源（与「添加」共用同一表单）
+  const editingSource = editing ? store.liveSubscriptions.find((s) => s.url === editing) : undefined;
 
   const exportM3u = (url: string) => {
     window.open(api.liveExportUrl(url), '_blank', 'noopener');
   };
 
-  const testBadge = (key: string, url: string) => {
-    const t = tests[key];
-    return (
-      <span className="flex items-center gap-1 shrink-0">
-        {t?.status === 'done' && (
-          <span
-            className={cn(
-              'text-[10px] px-1.5 py-0.5 rounded',
-              t.ok ? 'bg-green-500/15 text-green-600 dark:text-green-400' : 'bg-red-500/15 text-red-500'
-            )}
-            title={t.ok ? `解析 ${t.ms}ms，共 ${t.count ?? 0} 个频道` : t.error}
-          >
-            {t.ok ? `✓ ${t.count ?? 0} 频道` : `✗ ${t.error?.slice(0, 12) || '失败'}`}
-          </span>
-        )}
-        <button
-          className={cn(
-            'rounded-md p-1.5 transition-colors disabled:opacity-40',
-            t?.status === 'done' && !t.ok ? 'text-red-400' : 'text-muted hover:text-accent hover:bg-hover'
-          )}
-          disabled={t?.status === 'loading'}
-          onClick={() => runTest(key, url)}
-          aria-label="测试此直播源"
-          title="拉取解析并测速（频道数量与耗时）"
-        >
-          {t?.status === 'loading' ? '…' : '⚡'}
-        </button>
-      </span>
-    );
+  const allEnabled = rows.length > 0 && rows.every((r) => store.liveSelectedUrls.includes(r.url));
+  const toggleAll = () => {
+    // 只翻转状态与目标不一致的源，一次批量 set 完成（逐条 toggle 会触发 O(n) 次持久化）
+    const targets = rows
+      .filter((r) => store.liveSelectedUrls.includes(r.url) === allEnabled)
+      .map((r) => r.url);
+    if (targets.length > 0) useAppStore.getState().toggleLiveSelectedMany(targets);
   };
 
-  const renderRow = ({
-    url,
-    label,
-    epgUrl,
-    preset = false,
-    lastSync,
-    fromSubscription,
-  }: {
-    url: string;
-    label: string;
-    epgUrl?: string;
-    preset?: boolean;
-    lastSync?: number;
-    /** 该直播源来自哪个订阅 URL；有值时由订阅统一管理，不可单独删除 */
-    fromSubscription?: string;
-  }) => (
-    <li key={url} className="bg-card rounded-lg p-3 transition-colors hover:bg-hover/50">
-      <div className="flex items-center gap-2">
-        <input
-          type="checkbox"
-          className="h-4 w-4 accent-[#2563eb] shrink-0"
-          checked={store.liveSelectedUrls.includes(url)}
-          onChange={() => store.toggleLiveSelected(url)}
-          aria-label={store.liveSelectedUrls.includes(url) ? `停用 ${label}` : `启用 ${label}`}
-          title={store.liveSelectedUrls.includes(url) ? '已启用，取消勾选可停用' : '已停用，勾选后生效'}
-        />
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-medium text-content truncate">
-            {label}
-            {preset && (
-              <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-chip text-faint align-middle">
-                部署者预置
-              </span>
-            )}
-            {fromSubscription && (
-              <span
-                className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent align-middle"
-                title="来自数据源订阅，重新同步时此源的名称/地址会以订阅内容为准"
-              >
-                订阅
-              </span>
-            )}
-          </div>
-          <div className="text-xs text-faint truncate">
-            {url}
-            {epgUrl && ' · 已配置节目单'}
-            {lastSync && ` · 同步于 ${formatRelativeTime(lastSync)}`}
-          </div>
-        </div>
-        {testBadge(url, url)}
-        <button
-          className="rounded-md p-1.5 text-muted transition-colors hover:bg-hover hover:text-accent"
-          onClick={() => exportM3u(url)}
-          aria-label="导出 M3U"
-          title="导出为标准 M3U 文件"
-        >
-          ⇩
-        </button>
-        {fromSubscription ? (
-          <button
-            className="rounded-md p-1.5 text-muted/40"
-            onClick={() => toast('该直播源来自数据源订阅；请到「订阅与配置 → 数据源订阅」中删除整个订阅', 'info')}
-            aria-label="订阅源不可单独删除"
-            title="该源来自订阅，单独删除会在下次同步时恢复；如需移除请删除整个订阅"
-          >
-            ✕
-          </button>
-        ) : (
-          !preset && (
-            <button
-              className="rounded-md p-1.5 text-muted transition-colors hover:bg-hover hover:text-red-400"
-              onClick={() => store.removeLiveSubscription(url)}
-              aria-label="删除直播源"
-            >
-              ✕
-            </button>
-          )
-        )}
-      </div>
-    </li>
-  );
+  const removeWithUndo = (row: LiveRow) => {
+    const snapshot = useAppStore.getState().removeLiveSubscription(row.url);
+    if (!snapshot) return;
+    // 正在编辑的条目被移除时收起表单，避免表单悬空
+    if (editing === row.url) setEditing(null);
+    toast(`已移除「${row.label}」`, 'info', {
+      action: {
+        label: '撤销',
+        onClick: () => {
+          useAppStore.getState().restoreLiveSubscription(snapshot);
+          toast('已恢复', 'success');
+        },
+      },
+    });
+  };
+
+  const empty = store.liveEnvSources.length === 0 && store.liveSubscriptions.length === 0;
 
   return (
-    <section className="mb-6 pt-5">
-      <div className="flex items-center justify-between mb-2.5">
-        <h3 className="text-sm font-semibold text-content">直播源</h3>
-        <span className="text-[10px] text-faint">M3U 订阅 · /live 页面播放</span>
-      </div>
-      <div className="space-y-2 mb-2.5">
-        <input
-          className="input w-full"
-          placeholder="M3U 订阅地址，如 https://example.com/list.m3u"
-          value={subUrl}
-          maxLength={500}
-          onChange={(e) => setSubUrl(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') addAndTest();
-          }}
+    <section>
+      <SectionTitle
+        title="直播源"
+        hint={empty ? 'M3U 订阅 · /live 页面播放' : `共 ${store.liveEnvSources.length + store.liveSubscriptions.length} 个 · 已启用 ${store.liveSelectedUrls.length}`}
+        extra={
+          <button className="btn-primary btn-sm" onClick={() => setAdding(true)}>
+            <Icon name="plus" className="w-3.5 h-3.5" />
+            添加直播源
+          </button>
+        }
+      />
+
+      {/* 与点播源一致：由「+ 添加 / 编辑」按钮展开同一表单，而非常驻占位 */}
+      <LiveSourceForm
+        visible={adding || editingSource !== undefined}
+        initial={editingSource}
+        onCancel={() => {
+          setAdding(false);
+          setEditing(null);
+        }}
+        onSubmit={(data) => {
+          if (editing) {
+            // 编辑模式：只更新名称与 EPG（地址不可改）
+            store.updateLiveSubscription(editing, { name: data.name, epg: data.epg });
+          } else {
+            store.addLiveSubscription(data.url, data.name, data.epg);
+            void runTest(data.url, () => api.liveTest(data.url));
+          }
+          setAdding(false);
+          setEditing(null);
+        }}
+      />
+
+      {empty && !adding && editingSource === undefined ? (
+        <EmptyState
+          icon="link"
+          title="还没有添加任何直播源"
+          description="添加 M3U 地址后即可在「直播」页按分组浏览与播放频道；也可在「数据源订阅」中一次导入点播源与直播源；部署者还可通过 DEFAULT_LIVE_SOURCES 环境变量预置。"
+          action={
+            <button className="btn-primary btn-sm" onClick={() => setAdding(true)}>
+              添加第一个直播源
+            </button>
+          }
         />
-        {(subUrl.trim() || name.trim() || epg.trim()) && (
-          <>
-            <input
-              className="input w-full"
-              placeholder="名称（可选），如 我的频道列表"
-              value={name}
-              maxLength={50}
-              onChange={(e) => setName(e.target.value)}
-            />
-            <input
-              className="input w-full"
-              placeholder="EPG 节目单地址（可选，XMLTV xml/xml.gz）"
-              value={epg}
-              maxLength={500}
-              onChange={(e) => setEpg(e.target.value)}
-            />
-          </>
-        )}
-        <button className="btn-primary !py-1.5 text-xs w-full" disabled={!subUrl.trim()} onClick={addAndTest}>
-          添加直播源
-        </button>
-      </div>
-      {store.liveEnvSources.length === 0 && store.liveSubscriptions.length === 0 ? (
-        <p className="text-xs text-faint">
-          添加 M3U 地址后即可在「直播」页按分组浏览与播放频道；也可在「订阅与配置 → 数据源订阅」中一次导入点播源与直播源；部署者还可通过 DEFAULT_LIVE_SOURCES 环境变量预置。
-        </p>
       ) : (
-        <ul className="space-y-2 max-h-[50vh] overflow-y-auto scrollbar-thin pr-1">
-          {store.liveEnvSources.map((s) => renderRow({ url: s.url, label: s.name, epgUrl: s.epg, preset: true }))}
-          {store.liveSubscriptions.map((s) =>
-            renderRow({
-              url: s.url,
-              label: s.name || hostnameOf(s.url),
-              epgUrl: s.epg,
-              lastSync: s.lastSync,
-              fromSubscription: s.fromSubscription,
-            })
+        <>
+          <div className="space-y-2 mb-3">
+            <SearchInput value={query} onChange={setQuery} placeholder="搜索名称或地址" />
+            <div className="flex flex-wrap items-center gap-1">
+              {LIVE_FILTERS.map((f) => (
+                <button
+                  key={f.id}
+                  className={cn(
+                    'chip',
+                    filter === f.id ? 'bg-accent/10 text-accent font-medium' : 'text-muted hover:text-content hover:bg-hover'
+                  )}
+                  onClick={() => setFilter(f.id)}
+                  aria-pressed={filter === f.id}
+                >
+                  {f.label}
+                </button>
+              ))}
+              <span className="ml-auto text-[11px] text-faint">显示 {rows.length} 个</span>
+            </div>
+            <button className="btn-ghost btn-sm" onClick={toggleAll} disabled={rows.length === 0}>
+              {allEnabled ? '全部停用' : '全部启用'}
+            </button>
+          </div>
+
+          {rows.length === 0 ? (
+            <EmptyState variant="plain" title="没有符合条件的源" />
+          ) : (
+            <ul className="space-y-2">
+              {rows.map((row) => {
+                const enabled = store.liveSelectedUrls.includes(row.url);
+                const fromSubscription = row.fromSubscriptions.length > 0;
+                return (
+                  <li
+                    key={row.url}
+                    className={cn(
+                      'bg-card rounded-lg p-3 transition-colors hover:bg-hover/50',
+                      // 未勾选 = 不参与直播列表：淡显，与点播源面板保持同一套停用观感
+                      !enabled && 'opacity-70'
+                    )}
+                  >
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 accent-accent shrink-0"
+                        checked={enabled}
+                        onChange={() => useAppStore.getState().toggleLiveSelected(row.url)}
+                        aria-label={enabled ? `停用 ${row.label}` : `启用 ${row.label}`}
+                        title={enabled ? '已启用，取消勾选可停用' : '已停用，勾选后生效'}
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-medium text-content truncate">
+                          {row.label}
+                          {row.preset && (
+                            <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-chip text-faint align-middle">
+                              部署者预置
+                            </span>
+                          )}
+                          {fromSubscription && (
+                            <span
+                              className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent align-middle"
+                              title={`来自 ${row.fromSubscriptions.length} 个数据源订阅；删除单个订阅不影响此源，仅当不再被任何订阅引用时才会移除`}
+                            >
+                              订阅
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-faint truncate">
+                          {row.url}
+                          {row.epgUrl && ' · 已配置节目单'}
+                          {row.lastSync && ` · 同步于 ${formatRelativeTime(row.lastSync)}`}
+                        </div>
+                      </div>
+                      <TestBadge
+                        state={tests[row.url]}
+                        onTest={() => runTest(row.url, () => api.liveTest(row.url))}
+                        title="拉取解析并测速（频道数量与耗时）"
+                        badgeWhenOk={({ count }) => `✓ ${count ?? 0} 频道`}
+                      />
+                      <button
+                        className="rounded-md p-2 text-muted transition-colors hover:bg-hover hover:text-accent shrink-0"
+                        onClick={() => exportM3u(row.url)}
+                        aria-label="导出 M3U"
+                        title="导出为标准 M3U 文件"
+                      >
+                        <Icon name="download" className="w-4 h-4" />
+                      </button>
+                      {row.preset ? null : fromSubscription ? (
+                        <>
+                          {/* 订阅源由远端列表管理：编辑会被下次同步覆盖、删除会复活，故置为禁用态并指路 */}
+                          <button
+                            className="rounded-md p-2 text-muted/30 cursor-not-allowed shrink-0"
+                            disabled
+                            aria-label="订阅源不可单独编辑"
+                            title="该源来自数据源订阅，修改会在下次同步时被覆盖；请修改远端订阅内容后重新同步"
+                          >
+                            <Icon name="edit" className="w-4 h-4" />
+                          </button>
+                          <button
+                            className="rounded-md p-2 text-muted/30 cursor-not-allowed shrink-0"
+                            disabled
+                            aria-label="订阅源不可单独删除"
+                            title="该源来自数据源订阅；请到「数据源订阅」中删除整个订阅"
+                          >
+                            <Icon name="trash" className="w-4 h-4" />
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            className="rounded-md p-2 text-muted transition-colors hover:bg-hover hover:text-accent shrink-0"
+                            onClick={() => setEditing(row.url)}
+                            aria-label="编辑"
+                            title="编辑名称与节目单地址"
+                          >
+                            <Icon name="edit" className="w-4 h-4" />
+                          </button>
+                          <button
+                            className="rounded-md p-2 text-muted transition-colors hover:bg-hover hover:text-danger shrink-0"
+                            onClick={() => removeWithUndo(row)}
+                            aria-label="删除直播源"
+                            title="移除（可在提示中撤销）"
+                          >
+                            <Icon name="trash" className="w-4 h-4" />
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
           )}
-        </ul>
+        </>
       )}
     </section>
+  );
+}
+
+/** 直播源表单：与点播源一致，由「+ 添加 / 编辑」按钮展开；编辑时地址只读、提交后自动探活（仅新增） */
+function LiveSourceForm({
+  visible,
+  initial,
+  onCancel,
+  onSubmit,
+}: {
+  visible: boolean;
+  /** 编辑模式：仅允许改名称与 EPG，地址只读 */
+  initial?: { url: string; name?: string; epg?: string };
+  onCancel: () => void;
+  onSubmit: (data: { url: string; name?: string; epg?: string }) => void;
+}) {
+  const [url, setUrl] = useState('');
+  const [name, setName] = useState('');
+  const [epg, setEpg] = useState('');
+  const { toast } = useToast();
+
+  useEffect(() => {
+    if (visible) {
+      setUrl(initial?.url ?? '');
+      setName(initial?.name ?? '');
+      setEpg(initial?.epg ?? '');
+    }
+  }, [visible, initial]);
+
+  if (!visible) return null;
+
+  const submit = () => {
+    if (initial) {
+      onSubmit({ url: initial.url, name: name.trim() || undefined, epg: epg.trim() || undefined });
+      return;
+    }
+    const u = url.trim();
+    if (!validateSourceUrl(u)) {
+      toast('订阅地址需以 http:// 或 https:// 开头', 'warning');
+      return;
+    }
+    onSubmit({ url: u, name: name.trim() || undefined, epg: epg.trim() || undefined });
+  };
+
+  return (
+    <div className="space-y-2 border border-line rounded-lg p-3 bg-chip mb-2">
+      <input
+        className="input w-full disabled:opacity-60"
+        aria-label="M3U 订阅地址"
+        placeholder="M3U 订阅地址，如 https://example.com/list.m3u"
+        value={url}
+        maxLength={500}
+        disabled={!!initial}
+        title={initial ? '地址不可修改；如需更换请删除后重新添加' : undefined}
+        onChange={(e) => setUrl(e.target.value)}
+      />
+      <input
+        className="input w-full"
+        aria-label="直播源名称（可选）"
+        placeholder="名称（可选），如 我的频道列表"
+        value={name}
+        maxLength={50}
+        onChange={(e) => setName(e.target.value)}
+      />
+      <input
+        className="input w-full"
+        aria-label="EPG 节目单地址（可选）"
+        placeholder="EPG 节目单地址（可选，XMLTV xml/xml.gz）"
+        value={epg}
+        maxLength={500}
+        onChange={(e) => setEpg(e.target.value)}
+      />
+      <div className="flex gap-2 justify-end">
+        <button className="btn-ghost btn-sm" onClick={onCancel}>
+          取消
+        </button>
+        <button className="btn-primary btn-sm" onClick={submit}>
+          添加
+        </button>
+      </div>
+    </div>
   );
 }

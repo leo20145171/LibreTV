@@ -4,11 +4,16 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api } from '@/lib/client-api';
 import type { SearchResultItem, VideoDetail } from '@/lib/types';
-import { buildImageUrl, buildWatchUrl } from '@/lib/utils';
+import { buildWatchUrl } from '@/lib/utils';
+import { SmartImage } from './smart-image';
 import { useAppStore, resolveSource } from '@/lib/store';
 import { useToast } from './toast';
 import { cn } from '@/lib/utils';
 import { addSearchHistory } from '@/lib/db';
+import { copyToClipboard } from '@/lib/clipboard';
+import { EmptyState, ErrorState, LoadingState } from './states';
+import { useFocusTrap } from './use-focus-trap';
+import { Icon } from './icon';
 
 /**
  * 详情弹窗：剧集列表 + 排序 + 复制链接。
@@ -25,9 +30,12 @@ export function DetailModal({ item, onClose }: { item: SearchResultItem | null; 
   const [reversed, setReversed] = useState(false);
   const [posterFailed, setPosterFailed] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
-  const poster = buildImageUrl(item?.pic, store.imageProxyMode, store.customImageProxy);
+  const panelRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => setPosterFailed(false), [poster]);
+  // 打开时把焦点移入弹窗、Tab 圈闭在弹窗内、关闭后归还焦点
+  useFocusTrap(Boolean(item), panelRef);
+
+  useEffect(() => setPosterFailed(false), [item?.pic, store.imageProxyMode, store.customImageProxy]);
 
   // 弹窗打开期间锁定背景滚动
   useEffect(() => {
@@ -100,12 +108,9 @@ export function DetailModal({ item, onClose }: { item: SearchResultItem | null; 
 
   const copyLinks = async () => {
     if (!detail) return;
-    try {
-      await navigator.clipboard.writeText(detail.episodes.join('\n'));
-      toast('播放链接已复制', 'success');
-    } catch {
-      toast('复制失败，请检查浏览器权限', 'error');
-    }
+    const ok = await copyToClipboard(detail.episodes.join('\n'));
+    if (ok) toast('播放链接已复制', 'success');
+    else toast('复制失败，请检查浏览器权限', 'error');
   };
 
   const metaRows = [
@@ -124,7 +129,14 @@ export function DetailModal({ item, onClose }: { item: SearchResultItem | null; 
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="bg-surface-raised rounded-xl w-full max-w-3xl shadow-2xl animate-slide-up" role="dialog" aria-modal>
+      <div
+        ref={panelRef}
+        tabIndex={-1}
+        className="bg-surface-raised rounded-xl w-full max-w-3xl shadow-2xl animate-slide-up outline-none"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${item.name} 详情`}
+      >
         <div className="flex items-start justify-between gap-4 p-5 pb-3 border-b border-line">
           <div className="min-w-0">
             <h2 className="text-lg font-semibold text-content break-words">{item.name}</h2>
@@ -142,37 +154,29 @@ export function DetailModal({ item, onClose }: { item: SearchResultItem | null; 
         </div>
 
         <div className="p-5 pt-4">
-          {loading && (
-            <div className="flex flex-col items-center py-10 gap-3">
-              <div className="h-8 w-8 rounded-full border-4 border-line border-t-accent animate-spin" />
-              <p className="text-sm text-muted">正在获取剧集信息...</p>
-            </div>
-          )}
+          {loading && <LoadingState label="正在获取剧集信息..." />}
 
-          {!loading && error && (
-            <div className="text-center py-8">
-              <div className="text-red-400 mb-1.5">❌ 获取失败</div>
-              <div className="text-sm text-faint">{error}</div>
-            </div>
-          )}
+          {!loading && error && <ErrorState message={error || '获取失败'} />}
 
           {!loading && !error && detail && (
             <>
               <div className="flex flex-col sm:flex-row gap-4 mb-4">
-                {poster && !posterFailed && (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={poster}
+                {item?.pic && !posterFailed && (
+                  <SmartImage
+                    url={item.pic}
+                    mode={store.imageProxyMode}
+                    customProxy={store.customImageProxy}
                     alt={item.name}
                     className="w-24 sm:w-32 aspect-[2/3] object-cover rounded-lg bg-chip shrink-0 self-center sm:self-start"
-                    onError={() => setPosterFailed(true)}
+                    loading="eager"
+                    onExhausted={() => setPosterFailed(true)}
                   />
                 )}
                 <div className="min-w-0 space-y-3">
                   {metaRows.length > 0 && (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5 text-sm">
                       {metaRows.map(([k, v]) => (
-                        <div key={k} className="truncate">
+                        <div key={k} className="truncate" title={`${k}: ${v}`}>
                           <span className="text-faint">{k}:</span>{' '}
                           <span className="text-content">{v}</span>
                         </div>
@@ -190,18 +194,20 @@ export function DetailModal({ item, onClose }: { item: SearchResultItem | null; 
                   <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                     <div className="flex items-center gap-2">
                       <button
-                        className="btn-ghost !py-1.5 text-xs"
+                        className="btn-ghost btn-sm"
                         onClick={() => setReversed((v) => !v)}
-                        aria-label={reversed ? '切换为正序' : '切换为倒序'}
+                        aria-label={reversed ? '切换为正序排列' : '切换为倒序排列'}
+                        title="调整剧集列表的排列顺序"
                       >
-                        <svg className={cn('w-3.5 h-3.5 transition-transform', reversed && 'rotate-180')} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
-                        </svg>
+                        <Icon
+                          name="arrowDown"
+                          className={cn('w-3.5 h-3.5 transition-transform', reversed && 'rotate-180')}
+                        />
                         {reversed ? '正序排列' : '倒序排列'}
                       </button>
                       <span className="text-sm text-faint">共 {episodes.length} 集</span>
                     </div>
-                    <button className="btn-primary !py-1.5 text-xs" onClick={copyLinks}>
+                    <button className="btn-primary btn-sm" onClick={copyLinks}>
                       复制链接
                     </button>
                   </div>
@@ -211,7 +217,7 @@ export function DetailModal({ item, onClose }: { item: SearchResultItem | null; 
                       return (
                         <button
                           key={realIndex}
-                          className="btn-ghost !px-1 text-center"
+                          className="btn-ghost btn-sm !px-1 text-center"
                           onClick={() => play(realIndex)}
                         >
                           {realIndex + 1}
@@ -221,10 +227,11 @@ export function DetailModal({ item, onClose }: { item: SearchResultItem | null; 
                   </div>
                 </>
               ) : (
-                <div className="text-center py-8">
-                  <div className="text-red-400 mb-1.5">❌ 未找到播放资源</div>
-                  <div className="text-sm text-faint">该视频可能暂时无法播放，请尝试其他视频</div>
-                </div>
+                <EmptyState
+                  icon="alert"
+                  title="未找到播放资源"
+                  description="该视频可能暂时无法播放，请尝试其他视频"
+                />
               )}
             </>
           )}

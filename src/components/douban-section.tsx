@@ -23,11 +23,14 @@ export function RecommendSection({ onPick }: { onPick: (title: string) => void }
   return <DoubanView onPick={onPick} />;
 }
 
-/** 豆瓣推荐：影视切换 + 标签筛选 + 分页加载 */
+/**
+ * 豆瓣推荐：影视切换 + 标签筛选。
+ * 一次性渲染全部条目：数据本就一次拉全（50 条），卡片图片又是 lazy 加载，
+ * 视口外的图不会请求，因此不需要「加载更多」这类本地切片分页来打断浏览。
+ */
 function DoubanView({ onPick }: { onPick: (title: string) => void }) {
   const [type, setType] = useState<'movie' | 'tv'>('movie');
   const [tag, setTag] = useState('热门');
-  const [visibleCount, setVisibleCount] = useState(25);
 
   const query = useQuery({
     queryKey: ['douban', type, tag],
@@ -36,13 +39,11 @@ function DoubanView({ onPick }: { onPick: (title: string) => void }) {
 
   const tags = type === 'movie' ? MOVIE_TAGS : TV_TAGS;
   const items = query.data?.items ?? [];
-  const shown = items.slice(0, visibleCount);
 
   const switchType = (t: 'movie' | 'tv') => {
     if (t === type) return;
     setType(t);
-    setTag(t === 'movie' ? '热门' : '热门');
-    setVisibleCount(25);
+    setTag('热门');
   };
 
   return (
@@ -66,12 +67,9 @@ function DoubanView({ onPick }: { onPick: (title: string) => void }) {
             key={t}
             className={cn(
               'px-2.5 py-1 rounded-full text-xs transition-colors',
-              t === tag ? 'bg-accent text-white' : 'bg-chip text-muted hover:text-content hover:bg-hover'
+              t === tag ? 'bg-accent text-on-accent' : 'bg-chip text-muted hover:text-content hover:bg-hover'
             )}
-            onClick={() => {
-              setTag(t);
-              setVisibleCount(25);
-            }}
+            onClick={() => setTag(t)}
           >
             {t}
           </button>
@@ -82,27 +80,21 @@ function DoubanView({ onPick }: { onPick: (title: string) => void }) {
         <p className="text-center text-sm text-faint py-8">推荐内容加载失败，可稍后重试或在设置中关闭</p>
       ) : query.isLoading ? (
         <GridSkeleton />
+      ) : items.length === 0 ? (
+        <p className="text-center text-sm text-faint py-8">该分类暂无推荐内容</p>
       ) : (
-        <>
-          <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2.5">
-            {shown.map((item) => (
-              <DoubanCard key={item.id} item={item} onClick={() => onPick(item.title)} />
-            ))}
-          </div>
-          {visibleCount < items.length && (
-            <div className="text-center mt-4">
-              <button className="btn-ghost" onClick={() => setVisibleCount((v) => v + 25)}>
-                加载更多
-              </button>
-            </div>
-          )}
-        </>
+        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2.5">
+          {items.map((item) => (
+            <DoubanCard key={item.id} item={item} onClick={() => onPick(item.title)} />
+          ))}
+        </div>
       )}
     </section>
   );
 }
 
-/** Bangumi 每日放送：星期筛选，一次拉全量无分页 */function BangumiView({ onPick }: { onPick: (title: string) => void }) {
+/** Bangumi 每日放送：星期筛选，一次拉全量无分页 */
+function BangumiView({ onPick }: { onPick: (title: string) => void }) {
   const [weekday, setWeekday] = useState<number | 'all'>('all');
 
   const query = useQuery({
@@ -208,7 +200,7 @@ function ChipButton({ active, onClick, children }: { active: boolean; onClick: (
     <button
       className={cn(
         'px-2.5 py-1 rounded-full text-xs transition-colors',
-        active ? 'bg-accent text-white' : 'bg-chip text-muted hover:text-content hover:bg-hover'
+        active ? 'bg-accent text-on-accent' : 'bg-chip text-muted hover:text-content hover:bg-hover'
       )}
       onClick={onClick}
     >
@@ -220,7 +212,7 @@ function ChipButton({ active, onClick, children }: { active: boolean; onClick: (
 function TypeButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
     <button
-      className={cn('px-3.5 py-1.5 rounded-md text-sm transition-colors', active ? 'bg-accent text-white' : 'text-muted hover:text-content')}
+      className={cn('px-3.5 py-1.5 rounded-md text-sm transition-colors', active ? 'bg-accent text-on-accent' : 'text-muted hover:text-content')}
       onClick={onClick}
       aria-pressed={active}
     >
