@@ -199,6 +199,7 @@ function WatchContent() {
       <header className="sticky top-0 z-40 bg-surface/90 backdrop-blur border-b border-line">
         <div className="max-w-7xl mx-auto px-4 h-14 flex items-center gap-3">
           <BackButton />
+          <HomeButton />
           <div className="min-w-0">
             <h1 className="text-sm font-medium text-content truncate">{videoTitle}</h1>
             <p className="text-xs text-faint">
@@ -383,5 +384,19 @@ function BackButton() {
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
       </svg>
     </button>
+  );
+}
+
+/** 首页按钮：直达首页，避免从外链进入时逐级 back */
+function HomeButton() {
+  return (
+    <Link
+      href="/"
+      className="p-2 rounded-md text-muted hover:text-content hover:bg-hover transition-colors"
+      aria-label="回首页"
+      title="回首页"
+    >
+      <Icon name="home" className="w-5 h-5" />
+    </Link>
   );
 }

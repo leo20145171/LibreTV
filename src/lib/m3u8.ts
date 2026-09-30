@@ -62,6 +62,7 @@ const LEAD_AD_MAX_SEGMENTS = 20;
  * hls.js 把整条流当连续时间轴，视频丢帧、音频错位，出现「只闻广告声不见其画面」）。
  *
  * 保守判定（全部满足才剔除）：
+ * 0. 多分组封装下片头组与其余组同构时跳过（分组多且片头组大小≈其余组中位数 ⇒ 封装边界，以免误杀）；
  * 1. 首个分片之前存在 DISCONTINUITY（存在「片头插入段」结构）；
  * 2. 该段以下一个 DISCONTINUITY 结束，且其后仍有分段（否则无法与正片区分）；
  * 3. 段时长 ≤ 90s 且分片数 ≤ 20。
@@ -79,12 +80,37 @@ export function stripLeadAdGroup(m3u8Content: string): string {
     return t !== '' && !t.startsWith('#');
   };
 
-  const firstDisc = lines.findIndex(isDisc);
-  if (firstDisc === -1) return m3u8Content;
+  // 多分组封装（采集站把流按固定块切分、每个衔接处都打 DISCONTINUITY）不是广告。
+  // 实测两类源均在片头误删过正片：rycjapi 每组 5 片（间隙完全均匀），
+  // dytt 每组多为 5 片但偶有 10/15/20 片长组（间隙不均匀，均匀性判据失灵）。
+  // 两者的共性是：片头组与其余分组同构（大小一致），任何启发式都无法区分——
+  // 这种情况下跳过片头剔除。仅当片头组大小明显异于其余组的中位数（疑似真插入段）才继续。
+  const discIdx: number[] = [];
+  for (let i = 0; i < lines.length; i++) if (isDisc(lines[i])) discIdx.push(i);
+  if (discIdx.length >= 4) {
+    const groupSize = (from: number, to: number) => {
+      let seg = 0;
+      for (let k = from; k < to; k++) if (isSegment(lines[k])) seg += 1;
+      return seg;
+    };
+    const leadSize = groupSize(discIdx[0] + 1, discIdx[1]);
+    const others: number[] = [];
+    for (let g = 1; g < discIdx.length; g++) {
+      others.push(groupSize(discIdx[g] + 1, g + 1 < discIdx.length ? discIdx[g + 1] : lines.length));
+    }
+    const sorted = [...others].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    // 与中位数偏差在阈值内视为同构（阈值下限 3 片，避免小分组时过度敏感）
+    const typical = Math.abs(leadSize - median) <= Math.max(3, median * 0.5);
+    if (typical) return m3u8Content; // 片头组与其余组无异 ⇒ 封装边界，跳过片头剔除
+  }
+
+  const firstDisc = discIdx[0];
+  if (firstDisc === undefined) return m3u8Content;
   if (lines.slice(0, firstDisc).some(isSegment)) return m3u8Content;
 
-  const nextDisc = lines.findIndex((l, i) => i > firstDisc && isDisc(l));
-  if (nextDisc === -1) return m3u8Content;
+  const nextDisc = discIdx.slice(1).find((i) => i > firstDisc);
+  if (nextDisc === undefined) return m3u8Content;
 
   let seconds = 0;
   let count = 0;
